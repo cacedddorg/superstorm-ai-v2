@@ -1,0 +1,28 @@
+# Dependencies and virtual environments
+**/node_modules/
+**/.venv/
+**/venv/
+
+# Framework/build output
+**/.next/
+**/out/
+**/build/
+**/dist/
+**/coverage/
+**/__pycache__/
+*.py[cod]
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+**/.env.local
+**/.env.*.local
+
+# Local tooling and generated staging data
+.jules-archive-staging/
+.vercel/
+*.tsbuildinfo
+next-env.d.ts
+*.log
+*.pem
