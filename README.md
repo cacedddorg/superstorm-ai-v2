@@ -21,5 +21,13 @@ This repository contains a full-stack Next.js and FastAPI application to deliver
    - `AUTH_USER`: Username for Basic Auth to protect the private dashboard.
    - `AUTH_PASSWORD`: Password for Basic Auth.
 
+**Important Security Note for Production:** The basic frontend authentication set up in this repository only protects the frontend web server (Next.js) rendering the UI. It **does not** protect the backend API or WebSocket endpoints if they are exposed publicly. If you deploy the backend, you must configure a reverse proxy, WAF, or backend authentication (e.g. JWT tokens or VPN access) to prevent unauthorized access to your market data feeds. Ensure you use HTTPS/WSS.
+
+## Supported Features
+- Connects to official Bybit and Binance public WebSockets for live market data (BTCUSDT by default).
+- Calculates real-time order-flow and microstructure metrics (CVD, spread, midpoint, microprice, imbalance, simple OFI proxy).
+- Paper-trading simulation with a coordinated 4-strategy architecture prioritizing risk gates.
+- Real-money live execution is currently disabled for safety (paper-trading/simulation only).
+
 ## Getting Started Locally
 See `AGENTS.md` for architecture details, setup commands, and conventions.

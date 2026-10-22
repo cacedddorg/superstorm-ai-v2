@@ -8,6 +8,7 @@ services:
       - "8000:8000"
     environment:
       - ENV=development
+      - ALLOWED_ORIGINS=http://localhost:3000
     volumes:
       - ./services/market-engine:/app
 
@@ -18,8 +19,8 @@ services:
       - "3000:3000"
     environment:
       - NEXT_PUBLIC_WS_URL=ws://localhost:8000/ws/orderbook
-      - AUTH_USER=${AUTH_USER:?Set AUTH_USER in the project .env file}
-      - AUTH_PASSWORD=${AUTH_PASSWORD:?Set AUTH_PASSWORD in the project .env file}
+      - AUTH_USER=${AUTH_USER:-admin}
+      - AUTH_PASSWORD=${AUTH_PASSWORD:-superstorm}
     volumes:
       - ./apps/web:/app
       - /app/node_modules
