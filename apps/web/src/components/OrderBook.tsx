@@ -23,7 +23,7 @@ export default function OrderBook({ data }: { data: MarketStatusPayload | null }
         </span>
       </div>
       <div className="flex justify-between px-4 pt-2 text-xs text-gray-400">
-        <span>{data.exchange.toUpperCase()} · linear</span>
+        <span>{data.exchange.toUpperCase()} · {data.category}</span>
         <span>captured {new Date(data.fetched_at).toLocaleTimeString()}</span>
       </div>
       {!validBook && (
@@ -50,7 +50,7 @@ export default function OrderBook({ data }: { data: MarketStatusPayload | null }
           ))}
         </div>
       </div>
-      <p className="px-4 pb-3 text-xs text-gray-500">Top 10 visible levels from a Bybit REST snapshot; not full market depth.</p>
+      <p className="px-4 pb-3 text-xs text-gray-500">Top 10 visible levels from an exchange REST snapshot; not full market depth.</p>
     </div>
   );
 }
