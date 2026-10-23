@@ -29,6 +29,30 @@ describe("fetchPublicMarketSnapshot", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("drops malformed individual trades without discarding a valid Bybit book", async () => {
+    const now = Date.now();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("orderbook")) return response({ retCode: 0, result: { ts: now, b: [["100", "2"]], a: [["101", "3"]] } });
+      if (url.includes("recent-trade")) return response({
+        retCode: 0,
+        time: now,
+        result: { list: [
+          { price: "100", size: "1", side: "Buy", time: String(now) },
+          { price: "100", size: "1", side: "Buy" },
+        ] },
+      });
+      throw new Error(`Unexpected endpoint ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const snapshot = await fetchPublicMarketSnapshot("BTCUSDT");
+
+    expect(snapshot.exchange).toBe("bybit");
+    expect(snapshot.trades).toHaveLength(1);
+    expect(snapshot.trades[0].timestamp).toBe(now);
+  });
+
   it("falls back to Binance from the browser and preserves provider error detail", async () => {
     const now = Date.now();
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
@@ -78,3 +102,4 @@ describe("fetchPublicMarketSnapshot", () => {
     await expect(fetchPublicMarketSnapshot("BTCUSDT")).rejects.toThrow(/Binance USDⓈ-M HTTP 451: Jurisdiction blocked/);
   });
 });
+

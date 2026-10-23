@@ -14,6 +14,23 @@ type BinanceTrade = { price?: string; qty?: string; time?: number; isBuyerMaker?
 type CoinbaseBook = { bids?: [string, string, number][]; asks?: [string, string, number][]; time?: string };
 type CoinbaseTrade = { price?: string; size?: string; time?: string; side?: "buy" | "sell" };
 
+function normalizeTrade(
+  price: string | undefined,
+  size: string | undefined,
+  timestamp: number | undefined,
+  side: string | undefined,
+): NonNullable<MarketSnapshotInput["trades"][number]> | null {
+  const numericPrice = Number(price);
+  const numericSize = Number(size);
+  if (!Number.isFinite(numericPrice) || numericPrice <= 0 ||
+      !Number.isFinite(numericSize) || numericSize <= 0 ||
+      typeof timestamp !== "number" || !Number.isFinite(timestamp) || timestamp <= 0 ||
+      (side?.toLowerCase() !== "buy" && side?.toLowerCase() !== "sell")) {
+    return null;
+  }
+  return { price, size, timestamp, side: side.toLowerCase() };
+}
+
 async function checkedJson<T>(url: string, provider: string): Promise<T> {
   const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(6_000) });
   if (!response.ok) {
@@ -61,9 +78,13 @@ export async function fetchPublicMarketSnapshot(requestedSymbol: string): Promis
     return {
       exchange: "bybit", category: "linear", symbol,
       bids: book.b.slice(0, BOOK_LIMIT), asks: book.a.slice(0, BOOK_LIMIT),
-      trades: (tradeData.list ?? []).slice(0, TRADE_LIMIT).map((trade) => ({
-        price: trade.price, size: trade.size, timestamp: Number(trade.time), side: trade.side,
-      })),
+      // A malformed trade row must not invalidate an otherwise good book.
+      // Keep only fully usable rows so NaN cannot serialize to null and fail
+      // the authenticated snapshot validator.
+      trades: (tradeData.list ?? []).slice(0, TRADE_LIMIT).flatMap((trade) => {
+        const normalized = normalizeTrade(trade.price, trade.size, Number(trade.time), trade.side);
+        return normalized ? [normalized] : [];
+      }),
       exchange_timestamp: Number(book.ts), trade_server_time: Number(tradeResponse.time ?? Date.now()),
     };
   } catch (error) {
@@ -83,10 +104,11 @@ export async function fetchPublicMarketSnapshot(requestedSymbol: string): Promis
     return {
       exchange: "binance", category: "linear", symbol,
       bids: book.bids.slice(0, BOOK_LIMIT), asks: book.asks.slice(0, BOOK_LIMIT),
-      trades: trades.slice(0, TRADE_LIMIT).map((trade) => ({
-        price: trade.price, size: trade.qty, timestamp: trade.time,
-        side: trade.isBuyerMaker === true ? "sell" : trade.isBuyerMaker === false ? "buy" : undefined,
-      })),
+      trades: trades.slice(0, TRADE_LIMIT).flatMap((trade) => {
+        const side = trade.isBuyerMaker === true ? "sell" : trade.isBuyerMaker === false ? "buy" : undefined;
+        const normalized = normalizeTrade(trade.price, trade.qty, trade.time, side);
+        return normalized ? [normalized] : [];
+      }),
       exchange_timestamp: Number(book.T), trade_server_time: Date.now(),
     };
   } catch (error) {
@@ -109,10 +131,13 @@ export async function fetchPublicMarketSnapshot(requestedSymbol: string): Promis
       bids: book.bids.slice(0, BOOK_LIMIT).map(([price, size]) => [price, size]),
       asks: book.asks.slice(0, BOOK_LIMIT).map(([price, size]) => [price, size]),
       // Coinbase reports the maker side; reverse it to estimate the aggressing side.
-      trades: trades.slice(0, TRADE_LIMIT).map((trade) => ({
-        price: trade.price, size: trade.size, timestamp: trade.time ? Date.parse(trade.time) : undefined,
-        side: trade.side === "buy" ? "sell" : trade.side === "sell" ? "buy" : undefined,
-      })),
+      trades: trades.slice(0, TRADE_LIMIT).flatMap((trade) => {
+        const timestamp = trade.time ? Date.parse(trade.time) : undefined;
+        // Coinbase reports the maker side; reverse it to estimate the aggressing side.
+        const side = trade.side === "buy" ? "sell" : trade.side === "sell" ? "buy" : undefined;
+        const normalized = normalizeTrade(trade.price, trade.size, timestamp, side);
+        return normalized ? [normalized] : [];
+      }),
       exchange_timestamp: Date.parse(book.time), trade_server_time: Date.now(),
     };
   } catch (error) {
@@ -120,3 +145,4 @@ export async function fetchPublicMarketSnapshot(requestedSymbol: string): Promis
     throw new Error(`${failures.join("; ")}; ${failure}`);
   }
 }
+
