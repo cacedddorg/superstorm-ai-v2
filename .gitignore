@@ -21,6 +21,7 @@
 
 # Local tooling and generated staging data
 .jules-archive-staging/
+.jules-back-review/
 .vercel/
 *.tsbuildinfo
 next-env.d.ts

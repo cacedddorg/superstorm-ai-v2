@@ -1,4 +1,5 @@
 import OrderBook from "../components/OrderBook";
+import MarketStatus from "../components/MarketStatus";
 
 export default function Home() {
   return (
@@ -17,13 +18,8 @@ export default function Home() {
           <OrderBook />
         </section>
 
-        {/* Strategy / charts stay inactive until the backend produces verified data. */}
-        <section className="md:col-span-2 border border-gray-800 rounded-lg p-6 bg-gray-900 flex flex-col items-center justify-center min-h-[400px]">
-          <h2 className="text-xl font-bold text-gray-300 mb-4 font-mono">Market engine status</h2>
-          <div className="text-center text-gray-400 font-mono space-y-2">
-            <p>Backend market-data ingestion is not configured yet.</p>
-            <p>No verified live prices or strategy signals are available.</p>
-          </div>
+        <section className="md:col-span-2">
+          <MarketStatus />
         </section>
         
       </div>

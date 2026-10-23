@@ -9,61 +9,100 @@ interface OrderBookData {
   bids: OrderBookEntry[];
   asks: OrderBookEntry[];
   timestamp: number;
+  exchange: string;
+  data_age_ms: number;
+  connection_state: string;
+  data_quality: string;
+  is_valid: boolean;
 }
 
 export default function OrderBook() {
   const [data, setData] = useState<OrderBookData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [connected, setConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
     const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/ws/orderbook";
     
-    const connect = () => {
-      wsRef.current = new WebSocket(wsUrl);
+    let closedByCleanup = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    let connect: () => Promise<void>;
+    const scheduleReconnect = () => {
+      if (!closedByCleanup && !reconnectTimer) {
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = undefined;
+          void connect();
+        }, 3000);
+      }
+    };
 
-      wsRef.current.onopen = () => {
+    connect = async () => {
+      if (closedByCleanup) return;
+      let socket: WebSocket;
+      try {
+        const tokenResponse = await fetch("/api/market-token", { cache: "no-store" });
+        if (!tokenResponse.ok) throw new Error("Could not authenticate market-data connection");
+        const { token } = (await tokenResponse.json()) as { token: string };
+        if (closedByCleanup) return;
+        socket = new WebSocket(wsUrl, ["superstorm-market", token]);
+      } catch {
+        setConnected(false);
+        setError("Could not authenticate market-data connection; retrying");
+        scheduleReconnect();
+        return;
+      }
+      wsRef.current = socket;
+
+      socket.onopen = () => {
+        setConnected(true);
         setError(null);
-        console.log("Connected to orderbook stream");
       };
 
-      wsRef.current.onmessage = (event) => {
+      socket.onmessage = (event) => {
         try {
           const parsed: OrderBookData = JSON.parse(event.data);
           setData(parsed);
-        } catch (err) {
-          console.error("Failed to parse orderbook data", err);
+          setError(null);
+        } catch {
+          setError("Received an unreadable market-data message");
         }
       };
 
-      wsRef.current.onerror = () => {
-        setError("WebSocket Connection Error");
+      socket.onerror = () => {
+        setConnected(false);
+        setError("Market-data connection failed; retrying");
       };
 
-      wsRef.current.onclose = () => {
-        console.log("Orderbook stream closed, reconnecting...");
-        setTimeout(connect, 3000);
+      socket.onclose = () => {
+        setConnected(false);
+        if (!closedByCleanup) {
+          setError("Market-data connection lost; retrying");
+          scheduleReconnect();
+        }
       };
     };
 
     connect();
 
     return () => {
+      closedByCleanup = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       if (wsRef.current) {
+        wsRef.current.onclose = null;
         wsRef.current.close();
       }
     };
   }, []);
 
-  if (error) {
-    return <div className="text-red-500 font-mono p-4 border border-red-800 bg-red-950/30 rounded">{error}</div>;
-  }
-
   if (!data) {
-    return <div className="text-gray-400 font-mono p-4 animate-pulse">Waiting for market data...</div>;
+    return <div className="text-gray-400 font-mono p-4 border border-gray-800 rounded-lg">{error ?? "Waiting for market data connection…"}</div>;
   }
 
-  const { symbol, bids, asks } = data;
+  const validBook = connected && data.is_valid && data.data_quality === "GOOD";
+  const bids = validBook ? data.bids : [];
+  const asks = validBook ? data.asks : [];
+  const { symbol } = data;
 
   const displayAsks = [...asks].reverse();
 
@@ -71,8 +110,16 @@ export default function OrderBook() {
     <div className="font-mono text-sm bg-gray-900 border border-gray-800 rounded-lg overflow-hidden w-full max-w-sm">
       <div className="bg-gray-800 px-4 py-2 text-white font-bold flex justify-between">
         <span>{symbol}</span>
-        <span className="text-xs text-gray-400">Live Orderbook</span>
+        <span className={`text-xs ${validBook && connected ? "text-emerald-400" : "text-amber-400"}`}>
+          {validBook && connected ? "Live · verified feed" : data.data_quality}
+        </span>
       </div>
+      <div className="px-4 pt-2 text-xs text-gray-400 flex justify-between">
+        <span>{data.exchange.toUpperCase()} · {data.connection_state}</span>
+        <span>{data.data_age_ms > 0 ? `${data.data_age_ms} ms old` : "awaiting feed"}</span>
+      </div>
+      {error && <p className="px-4 pt-2 text-xs text-amber-400">{error}</p>}
+      {!validBook && <p className="px-4 pt-3 text-xs text-amber-300">No safe current book is available. Prices are hidden until fresh valid data arrives.</p>}
 
       <div className="flex flex-col p-2 space-y-1">
         <div className="flex flex-col">

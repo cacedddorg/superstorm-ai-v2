@@ -31,5 +31,5 @@ uvicorn api.main:app --reload --port 8000
 ```
 
 ## Testing Procedures
-Run `pytest tests/backend` for backend logic.
-Run `npm test` or `npm run build` in `apps/web` to verify frontend.
+Run `python -m pytest` from `services/market-engine` for backend logic.
+Run `npm run build` in `apps/web` to verify the frontend (there is no `npm test` script).

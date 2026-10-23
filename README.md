@@ -1,25 +1,19 @@
 # SUPERSTORM AI
 
-SUPERSTORM AI is a sophisticated real-time trading-analysis platform designed to identify potentially favorable market entries and exits using live market microstructure, liquidity, executed order flow, price structure, volatility, and a coordinated four-strategy architecture.
+SUPERSTORM AI is a private, single-user cryptocurrency market-research prototype. It consumes free public exchange market data and exposes exploratory strategy heuristics. It is not a verified profitable trading system and does not place orders or implement paper-trade execution.
 
 ## Overview
-This repository contains a full-stack Next.js and FastAPI application to deliver live cryptocurrency trading intelligence. 
+This repository contains a Next.js frontend and a separate FastAPI market-data service. Current backend coverage, missing measurements, and run instructions are documented in `services/market-engine/README.md`.
 
 ## Project Structure
 - `apps/web`: Next.js frontend with Tailwind CSS and TradingView charts.
-- `services/market-engine`: FastAPI backend to ingest live order book data, process market features, and execute strategies.
+- `services/market-engine`: FastAPI backend to ingest exchange order-book data, calculate features, and evaluate exploratory strategies.
 - `tests`: Unit and integration testing suites.
 
-## Deployment on Vercel Hobby
-**WARNING: Vercel Hobby tier is strictly for non-commercial and personal projects.** Please verify that your usage complies with Vercel's fair use and non-commercial restrictions before deploying this crypto intelligence dashboard.
+## Vercel and private-use restrictions
+Vercel Hobby is intended for personal, non-commercial use. This application is trading-related; do not assume it qualifies. Confirm eligibility against Vercel's current terms before connecting GitHub or deploying. This repository does not deploy automatically or enable paid services.
 
-1. Connect your GitHub repository to Vercel.
-2. Set the Framework Preset to Next.js.
-3. Configure the Root Directory to `apps/web`.
-4. Ensure the following environment variables are set in Vercel:
-   - `NEXT_PUBLIC_WS_URL`: The WebSocket URL of your backend.
-   - `AUTH_USER`: Username for Basic Auth to protect the private dashboard.
-   - `AUTH_PASSWORD`: Password for Basic Auth.
+If approved later, set the Vercel root directory to `apps/web`, configure `NEXT_PUBLIC_WS_URL`, `MARKET_ENGINE_URL`, `AUTH_USER`, `AUTH_PASSWORD`, and the same private `MARKET_API_SIGNING_SECRET` on both services. The frontend Basic Auth proxy protects the private frontend; short-lived HMAC tokens protect the backend REST and WebSocket routes. Production still requires HTTPS/WSS. Confirm Hobby eligibility before deployment.
 
 ## Getting Started Locally
 See `AGENTS.md` for architecture details, setup commands, and conventions.
