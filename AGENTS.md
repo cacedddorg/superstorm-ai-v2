@@ -12,7 +12,8 @@
 
 - The frontend is built on Next.js app router.
 - The backend relies on an asynchronous event loop via FastAPI.
-- Market data flows: Exchange WS -> Bybit Adapter -> Orderbook Manager -> Feature Engines -> Strategy Fusion -> FastAPI WS -> Frontend.
+- Dashboard refresh mode: user click -> authenticated Next.js API route -> public Bybit REST snapshot/trades -> server-side feature and strategy calculation -> UI.
+- Optional continuous-feed backend: Exchange WS -> exchange adapter -> Orderbook Manager -> Feature Engines -> Strategy Fusion -> FastAPI REST/WebSocket API.
 
 ## Setup Commands
 

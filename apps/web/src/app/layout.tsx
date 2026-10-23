@@ -16,7 +16,7 @@ const geistMono = localFont({
 
 export const metadata: Metadata = {
   title: "SUPERSTORM AI",
-  description: "Real-Time Cryptocurrency Intelligence",
+  description: "On-demand Cryptocurrency Market Research",
   manifest: "/manifest.json",
 };
 

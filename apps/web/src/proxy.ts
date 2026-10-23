@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { hasBasicAuthConfig, isAuthorizedBasicRequest } from "./lib/basic-auth";
 
 function unauthorized() {
   return new NextResponse("Authentication required", {
@@ -8,30 +9,12 @@ function unauthorized() {
 }
 
 export function proxy(request: NextRequest) {
-  const expectedUser = process.env.AUTH_USER;
-  const expectedPassword = process.env.AUTH_PASSWORD;
-
   // Fail closed: never protect a private dashboard with built-in credentials.
-  if (!expectedUser || !expectedPassword) {
+  if (!hasBasicAuthConfig()) {
     return new NextResponse("Authentication is not configured", { status: 503 });
   }
 
-  const authorization = request.headers.get("authorization");
-  if (!authorization?.startsWith("Basic ")) return unauthorized();
-
-  let decoded: string;
-  try {
-    decoded = atob(authorization.slice("Basic ".length));
-  } catch {
-    return unauthorized();
-  }
-
-  const separator = decoded.indexOf(":");
-  if (separator < 0) return unauthorized();
-
-  const user = decoded.slice(0, separator);
-  const password = decoded.slice(separator + 1);
-  if (user !== expectedUser || password !== expectedPassword) return unauthorized();
+  if (!isAuthorizedBasicRequest(request.headers.get("authorization"))) return unauthorized();
 
   return NextResponse.next();
 }

@@ -1,5 +1,6 @@
 services:
   market-engine:
+    profiles: ["continuous-feed"]
     build:
       context: ./services/market-engine
     ports:
@@ -13,14 +14,8 @@ services:
   web:
     build:
       context: ./apps/web
-      args:
-        NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://localhost:8000/ws/orderbook}
     ports:
       - "127.0.0.1:3000:3000"
     environment:
       AUTH_USER: ${AUTH_USER:?Set AUTH_USER in the project .env file}
       AUTH_PASSWORD: ${AUTH_PASSWORD:?Set AUTH_PASSWORD in the project .env file}
-      MARKET_API_SIGNING_SECRET: ${MARKET_API_SIGNING_SECRET:?Set MARKET_API_SIGNING_SECRET in the project .env file}
-      MARKET_ENGINE_URL: ${MARKET_ENGINE_URL:-http://market-engine:8000}
-    depends_on:
-      - market-engine

@@ -3,7 +3,7 @@
 SUPERSTORM AI is a private, single-user cryptocurrency market-research prototype. It consumes free public exchange market data and exposes exploratory strategy heuristics. It is not a verified profitable trading system and does not place orders or implement paper-trade execution.
 
 ## Overview
-This repository contains a Next.js frontend and a separate FastAPI market-data service. Current backend coverage, missing measurements, and run instructions are documented in `services/market-engine/README.md`.
+The dashboard now fetches a fresh public Bybit snapshot only when you press **Fetch snapshot** or **Refresh snapshot**. Its Next.js server route requests the public REST order book and recent trades, then calculates the available research features. The Python FastAPI/WebSocket engine remains a separate optional continuous-feed implementation and is not required by the refresh-based dashboard.
 
 ## Project Structure
 - `apps/web`: Next.js frontend with Tailwind CSS and TradingView charts.
@@ -13,7 +13,9 @@ This repository contains a Next.js frontend and a separate FastAPI market-data s
 ## Vercel and private-use restrictions
 Vercel Hobby is intended for personal, non-commercial use. This application is trading-related; do not assume it qualifies. Confirm eligibility against Vercel's current terms before connecting GitHub or deploying. This repository does not deploy automatically or enable paid services.
 
-If approved later, set the Vercel root directory to `apps/web`, configure `NEXT_PUBLIC_WS_URL`, `MARKET_ENGINE_URL`, `AUTH_USER`, `AUTH_PASSWORD`, and the same private `MARKET_API_SIGNING_SECRET` on both services. The frontend Basic Auth proxy protects the private frontend; short-lived HMAC tokens protect the backend REST and WebSocket routes. Production still requires HTTPS/WSS. Confirm Hobby eligibility before deployment.
+If approved later, set the Vercel root directory to `apps/web` and configure `AUTH_USER` and `AUTH_PASSWORD`. The single-user Basic Auth proxy also protects the on-demand market API route. Refresh requests call Bybit's public REST endpoints from the server; no exchange API key or separate always-on service is needed for this mode. Confirm Vercel Hobby eligibility before any deployment, especially for trading-related use. This repository does not deploy automatically or enable paid services.
+
+Refresh mode is deliberately snapshot-based: order-book flow between refreshes is only approximated from two snapshots in the current browser session; Strategy B remains unavailable because it requires sweep/reclaim history. Trade history is limited by the exchange response, and truncated samples suppress affected candidates. This mode does not claim continuous-feed quality.
 
 ## Getting Started Locally
-See `AGENTS.md` for architecture details, setup commands, and conventions.
+See `AGENTS.md` for setup commands and conventions. To run the frontend locally, create `apps/web/.env.local` with `AUTH_USER` and `AUTH_PASSWORD`, then run `npm run dev` from `apps/web`. The market snapshot route does not require the Python process.

@@ -3,8 +3,6 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 COPY . .
-ARG NEXT_PUBLIC_WS_URL=ws://localhost:8000/ws/orderbook
-ENV NEXT_PUBLIC_WS_URL=$NEXT_PUBLIC_WS_URL
 RUN npm run build
 RUN npm prune --omit=dev
 

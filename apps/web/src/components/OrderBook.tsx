@@ -1,155 +1,56 @@
-"use client";
+import type { MarketStatusPayload } from "../lib/market-types";
 
-import { useEffect, useState, useRef } from "react";
-
-type OrderBookEntry = [string, string];
-
-interface OrderBookData {
-  symbol: string;
-  bids: OrderBookEntry[];
-  asks: OrderBookEntry[];
-  timestamp: number;
-  exchange: string;
-  data_age_ms: number;
-  connection_state: string;
-  data_quality: string;
-  is_valid: boolean;
-}
-
-export default function OrderBook() {
-  const [data, setData] = useState<OrderBookData | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [connected, setConnected] = useState(false);
-  const wsRef = useRef<WebSocket | null>(null);
-
-  useEffect(() => {
-    const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/ws/orderbook";
-    
-    let closedByCleanup = false;
-    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
-    let connect: () => Promise<void>;
-    const scheduleReconnect = () => {
-      if (!closedByCleanup && !reconnectTimer) {
-        reconnectTimer = setTimeout(() => {
-          reconnectTimer = undefined;
-          void connect();
-        }, 3000);
-      }
-    };
-
-    connect = async () => {
-      if (closedByCleanup) return;
-      let socket: WebSocket;
-      try {
-        const tokenResponse = await fetch("/api/market-token", { cache: "no-store" });
-        if (!tokenResponse.ok) throw new Error("Could not authenticate market-data connection");
-        const { token } = (await tokenResponse.json()) as { token: string };
-        if (closedByCleanup) return;
-        socket = new WebSocket(wsUrl, ["superstorm-market", token]);
-      } catch {
-        setConnected(false);
-        setError("Could not authenticate market-data connection; retrying");
-        scheduleReconnect();
-        return;
-      }
-      wsRef.current = socket;
-
-      socket.onopen = () => {
-        setConnected(true);
-        setError(null);
-      };
-
-      socket.onmessage = (event) => {
-        try {
-          const parsed: OrderBookData = JSON.parse(event.data);
-          setData(parsed);
-          setError(null);
-        } catch {
-          setError("Received an unreadable market-data message");
-        }
-      };
-
-      socket.onerror = () => {
-        setConnected(false);
-        setError("Market-data connection failed; retrying");
-      };
-
-      socket.onclose = () => {
-        setConnected(false);
-        if (!closedByCleanup) {
-          setError("Market-data connection lost; retrying");
-          scheduleReconnect();
-        }
-      };
-    };
-
-    connect();
-
-    return () => {
-      closedByCleanup = true;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      if (wsRef.current) {
-        wsRef.current.onclose = null;
-        wsRef.current.close();
-      }
-    };
-  }, []);
-
+export default function OrderBook({ data }: { data: MarketStatusPayload | null }) {
   if (!data) {
-    return <div className="text-gray-400 font-mono p-4 border border-gray-800 rounded-lg">{error ?? "Waiting for market data connection…"}</div>;
+    return (
+      <div className="w-full rounded-lg border border-gray-800 p-4 font-mono text-sm text-gray-400">
+        The order book will load with your next manual snapshot request.
+      </div>
+    );
   }
 
-  const validBook = connected && data.is_valid && data.data_quality === "GOOD";
-  const bids = validBook ? data.bids : [];
-  const asks = validBook ? data.asks : [];
-  const { symbol } = data;
-
-  const displayAsks = [...asks].reverse();
+  const validBook = data.book_valid;
+  const bids = validBook ? data.orderbook.bids.slice(0, 10) : [];
+  const asks = validBook ? data.orderbook.asks.slice(0, 10) : [];
+  const midpoint = bids[0] && asks[0] ? (bids[0].price + asks[0].price) / 2 : null;
 
   return (
-    <div className="font-mono text-sm bg-gray-900 border border-gray-800 rounded-lg overflow-hidden w-full max-w-sm">
-      <div className="bg-gray-800 px-4 py-2 text-white font-bold flex justify-between">
-        <span>{symbol}</span>
-        <span className={`text-xs ${validBook && connected ? "text-emerald-400" : "text-amber-400"}`}>
-          {validBook && connected ? "Live · verified feed" : data.data_quality}
+    <div className="w-full max-w-sm overflow-hidden rounded-lg border border-gray-800 bg-gray-900 font-mono text-sm">
+      <div className="flex justify-between bg-gray-800 px-4 py-2 font-bold text-white">
+        <span>{data.symbol}</span>
+        <span className={`text-xs ${validBook ? "text-emerald-400" : "text-amber-400"}`}>
+          {validBook ? "REST snapshot" : data.quality.quality}
         </span>
       </div>
-      <div className="px-4 pt-2 text-xs text-gray-400 flex justify-between">
-        <span>{data.exchange.toUpperCase()} · {data.connection_state}</span>
-        <span>{data.data_age_ms > 0 ? `${data.data_age_ms} ms old` : "awaiting feed"}</span>
+      <div className="flex justify-between px-4 pt-2 text-xs text-gray-400">
+        <span>{data.exchange.toUpperCase()} · linear</span>
+        <span>captured {new Date(data.fetched_at).toLocaleTimeString()}</span>
       </div>
-      {error && <p className="px-4 pt-2 text-xs text-amber-400">{error}</p>}
-      {!validBook && <p className="px-4 pt-3 text-xs text-amber-300">No safe current book is available. Prices are hidden until fresh valid data arrives.</p>}
-
-      <div className="flex flex-col p-2 space-y-1">
+      {!validBook && (
+        <p className="px-4 pt-3 text-xs text-amber-300">
+          This snapshot failed the freshness or book-integrity check; its prices are hidden.
+        </p>
+      )}
+      <div className="flex flex-col space-y-1 p-2">
         <div className="flex flex-col">
-          {displayAsks.map(([price, qty], i) => (
-            <div key={`ask-${price}-${i}`} className="flex justify-between text-red-500 hover:bg-red-950/50 px-2 py-0.5 rounded cursor-default">
-              <span>{parseFloat(price).toFixed(2)}</span>
-              <span>{parseFloat(qty).toFixed(4)}</span>
+          {[...asks].reverse().map((level, index) => (
+            <div key={`ask-${level.price}-${index}`} className="flex justify-between rounded px-2 py-0.5 text-red-400">
+              <span>{level.price.toFixed(2)}</span><span>{level.quantity.toFixed(4)}</span>
             </div>
           ))}
         </div>
-
-        <div className="py-2 flex justify-center items-center border-y border-gray-800 my-1">
-          {asks.length > 0 && bids.length > 0 ? (
-            <span className="text-white font-bold text-lg">
-              {((parseFloat(asks[0][0]) + parseFloat(bids[0][0])) / 2).toFixed(2)}
-            </span>
-          ) : (
-            <span className="text-gray-500">...</span>
-          )}
+        <div className="my-1 flex items-center justify-center border-y border-gray-800 py-2">
+          {midpoint === null ? <span className="text-gray-500">—</span> : <span className="text-lg font-bold text-white">{midpoint.toFixed(2)}</span>}
         </div>
-
         <div className="flex flex-col">
-          {bids.map(([price, qty], i) => (
-            <div key={`bid-${price}-${i}`} className="flex justify-between text-green-500 hover:bg-green-950/50 px-2 py-0.5 rounded cursor-default">
-              <span>{parseFloat(price).toFixed(2)}</span>
-              <span>{parseFloat(qty).toFixed(4)}</span>
+          {bids.map((level, index) => (
+            <div key={`bid-${level.price}-${index}`} className="flex justify-between rounded px-2 py-0.5 text-green-400">
+              <span>{level.price.toFixed(2)}</span><span>{level.quantity.toFixed(4)}</span>
             </div>
           ))}
         </div>
       </div>
+      <p className="px-4 pb-3 text-xs text-gray-500">Top 10 visible levels from a Bybit REST snapshot; not full market depth.</p>
     </div>
   );
 }
