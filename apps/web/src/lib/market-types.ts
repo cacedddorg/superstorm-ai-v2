@@ -24,6 +24,17 @@ export type PreviousBookSample = {
   best_ask_qty: number;
 };
 
+export type MarketSnapshotInput = {
+  exchange: "bybit" | "binance" | "coinbase";
+  category: "linear" | "spot";
+  symbol: string;
+  bids: [string, string][];
+  asks: [string, string][];
+  trades: { price?: string; size?: string; timestamp?: number; side?: string }[];
+  exchange_timestamp: number;
+  trade_server_time: number;
+};
+
 export type MarketStatusPayload = {
   symbol: string;
   exchange: "bybit" | "binance" | "coinbase";

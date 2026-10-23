@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 import type { MarketStatusPayload, PreviousBookSample } from "../lib/market-types";
+import { fetchPublicMarketSnapshot } from "../lib/public-market-data";
 
 export default function MarketStatus({ onSnapshot }: { onSnapshot: (payload: MarketStatusPayload) => void }) {
   const [status, setStatus] = useState<MarketStatusPayload | null>(null);
@@ -16,6 +17,7 @@ export default function MarketStatus({ onSnapshot }: { onSnapshot: (payload: Mar
     setLoading(true);
     setError(null);
     try {
+      const snapshot = await fetchPublicMarketSnapshot(requestedSymbol);
       const response = await fetch("/api/market-status", {
         method: "POST",
         cache: "no-store",
@@ -23,6 +25,7 @@ export default function MarketStatus({ onSnapshot }: { onSnapshot: (payload: Mar
         body: JSON.stringify({
           symbol: requestedSymbol,
           previous_sample: previousSample.current?.symbol === requestedSymbol ? previousSample.current.sample : null,
+          snapshot,
         }),
       });
       const body = (await response.json()) as MarketStatusPayload | { error?: string };

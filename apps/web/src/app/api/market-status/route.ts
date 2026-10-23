@@ -3,6 +3,7 @@ import type {
   MarketStatusPayload,
   OrderBookLevel,
   PreviousBookSample,
+  MarketSnapshotInput,
   StrategyExplanation,
 } from "../../../lib/market-types";
 import { hasBasicAuthConfig, isAuthorizedBasicRequest } from "../../../lib/basic-auth";
@@ -10,56 +11,10 @@ import { hasBasicAuthConfig, isAuthorizedBasicRequest } from "../../../lib/basic
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const BYBIT_API = "https://api.bybit.com";
-const BINANCE_API = "https://fapi.binance.com";
-const COINBASE_API = "https://api.exchange.coinbase.com";
 const BOOK_LIMIT = 50;
 const TRADE_LIMIT = 100;
 const MAX_BOOK_AGE_MS = 15_000;
 const MAX_PREVIOUS_SAMPLE_AGE_MS = 60_000;
-
-type BybitEnvelope<T> = {
-  retCode?: number;
-  retMsg?: string;
-  time?: number;
-  result?: T;
-};
-
-type BybitBook = {
-  s?: string;
-  b?: [string, string][];
-  a?: [string, string][];
-  ts?: number;
-  u?: number;
-};
-
-type BybitTrade = {
-  price?: string;
-  size?: string;
-  side?: string;
-  time?: string;
-};
-
-type BinanceBook = {
-  bids?: [string, string][];
-  asks?: [string, string][];
-  T?: number;
-};
-
-type BinanceTrade = {
-  price?: string;
-  qty?: string;
-  time?: number;
-  isBuyerMaker?: boolean;
-};
-
-type CoinbaseBook = { bids?: [string, string, number][]; asks?: [string, string, number][]; time?: string };
-type CoinbaseTrade = { price?: string; size?: string; time?: string; side?: "buy" | "sell" };
-
-function coinbaseSpotProduct(symbol: string): string | null {
-  const match = /^([A-Z0-9]+)(?:USDT|USD)$/.exec(symbol);
-  return match ? `${match[1]}-USD` : null;
-}
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, {
@@ -122,12 +77,12 @@ export async function POST(request: Request) {
   if (!hasBasicAuthConfig()) return jsonError("Authentication is not configured", 503);
   if (!isAuthorizedBasicRequest(request.headers.get("authorization"))) return jsonError("Authentication required", 401);
   const contentLength = Number(request.headers.get("content-length") || 0);
-  if (contentLength > 2_048) return jsonError("Refresh request is too large", 413);
+  if (contentLength > 64_000) return jsonError("Refresh request is too large", 413);
   if (!request.headers.get("content-type")?.includes("application/json")) {
     return jsonError("Refresh request must use application/json", 415);
   }
 
-  let input: { symbol?: unknown; previous_sample?: unknown };
+  let input: { symbol?: unknown; previous_sample?: unknown; snapshot?: unknown };
   try {
     input = await request.json();
   } catch {
@@ -137,102 +92,46 @@ export async function POST(request: Request) {
   const symbol = typeof input.symbol === "string" ? input.symbol.trim().toUpperCase() : "BTCUSDT";
   if (!/^[A-Z0-9]{3,20}$/.test(symbol)) return jsonError("Invalid market symbol", 400);
 
+  const snapshot = input.snapshot as Partial<MarketSnapshotInput> | undefined;
+  if (!snapshot || !["bybit", "binance", "coinbase"].includes(snapshot.exchange ?? "") ||
+      !["linear", "spot"].includes(snapshot.category ?? "") ||
+      (snapshot.exchange === "coinbase") !== (snapshot.category === "spot") ||
+      typeof snapshot.symbol !== "string" || !/^[A-Z0-9]{3,20}(?:-USD)?$/.test(snapshot.symbol) ||
+      !Array.isArray(snapshot.bids) || snapshot.bids.length > BOOK_LIMIT ||
+      !Array.isArray(snapshot.asks) || snapshot.asks.length > BOOK_LIMIT ||
+      !Array.isArray(snapshot.trades) || snapshot.trades.length > TRADE_LIMIT ||
+      typeof snapshot.exchange_timestamp !== "number" || !Number.isFinite(snapshot.exchange_timestamp) ||
+      typeof snapshot.trade_server_time !== "number" || !Number.isFinite(snapshot.trade_server_time)) {
+    return jsonError("A valid public market snapshot is required", 400);
+  }
+  const expectedCoinbaseProduct = symbol.match(/^([A-Z0-9]+)(?:USDT|USD)$/)?.[1];
+  const expectedMarketSymbol = snapshot.exchange === "coinbase" ? `${expectedCoinbaseProduct}-USD` : symbol;
+  if (snapshot.symbol !== expectedMarketSymbol) return jsonError("Snapshot market does not match the requested symbol", 400);
+  const isStringPair = (entry: unknown): entry is [string, string] =>
+    Array.isArray(entry) && entry.length >= 2 && typeof entry[0] === "string" && typeof entry[1] === "string";
+  if (!snapshot.bids.every(isStringPair) || !snapshot.asks.every(isStringPair)) {
+    return jsonError("Market snapshot contains malformed order-book levels", 400);
+  }
+  const isTrade = (trade: unknown): trade is MarketSnapshotInput["trades"][number] => {
+    if (!trade || typeof trade !== "object") return false;
+    const item = trade as MarketSnapshotInput["trades"][number];
+    return (item.price === undefined || typeof item.price === "string") &&
+      (item.size === undefined || typeof item.size === "string") &&
+      (item.timestamp === undefined || (typeof item.timestamp === "number" && Number.isFinite(item.timestamp))) &&
+      (item.side === undefined || typeof item.side === "string");
+  };
+  if (!snapshot.trades.every(isTrade)) return jsonError("Market snapshot contains malformed trades", 400);
+
   try {
     type NormalizedTrade = { price?: string; size?: string; timestamp?: string | number; side?: string };
-    let exchange: "bybit" | "binance" | "coinbase" = "bybit";
-    let category: "linear" | "spot" = "linear";
-    let marketSymbol = symbol;
-    let rawBids: unknown;
-    let rawAsks: unknown;
-    let rawTrades: NormalizedTrade[] = [];
-    let exchangeTimestamp = 0;
-    let tradeServerTime = 0;
-    let bybitFailure = "Bybit market data is unavailable";
-
-    try {
-      const query = new URLSearchParams({ category: "linear", symbol, limit: String(BOOK_LIMIT) });
-      const tradesQuery = new URLSearchParams({ category: "linear", symbol, limit: String(TRADE_LIMIT) });
-      const [bookResponse, tradesResponse] = await Promise.all([
-        fetch(`${BYBIT_API}/v5/market/orderbook?${query}`, { cache: "no-store", signal: AbortSignal.timeout(8_000) }),
-        fetch(`${BYBIT_API}/v5/market/recent-trade?${tradesQuery}`, { cache: "no-store", signal: AbortSignal.timeout(8_000) }),
-      ]);
-      if (!bookResponse.ok || !tradesResponse.ok) {
-        throw new Error(`Bybit HTTP ${!bookResponse.ok ? bookResponse.status : tradesResponse.status}`);
-      }
-      const [bookEnvelope, tradesEnvelope] = await Promise.all([
-        bookResponse.json() as Promise<BybitEnvelope<BybitBook>>,
-        tradesResponse.json() as Promise<BybitEnvelope<{ list?: BybitTrade[] }>>,
-      ]);
-      if (bookEnvelope.retCode !== 0 || tradesEnvelope.retCode !== 0 || !bookEnvelope.result || !tradesEnvelope.result) {
-        throw new Error("Bybit returned an incomplete market snapshot");
-      }
-      rawBids = bookEnvelope.result.b;
-      rawAsks = bookEnvelope.result.a;
-      rawTrades = (tradesEnvelope.result.list ?? []).map((trade) => ({
-        price: trade.price, size: trade.size, timestamp: trade.time, side: trade.side,
-      }));
-      exchangeTimestamp = Number(bookEnvelope.result.ts);
-      tradeServerTime = Number(tradesEnvelope.time);
-    } catch (cause) {
-      bybitFailure = cause instanceof Error ? cause.message : bybitFailure;
-      exchange = "binance";
-      const query = new URLSearchParams({ symbol, limit: String(BOOK_LIMIT) });
-      const tradesQuery = new URLSearchParams({ symbol, limit: String(TRADE_LIMIT) });
-      const [bookResponse, tradesResponse] = await Promise.all([
-        fetch(`${BINANCE_API}/fapi/v1/depth?${query}`, { cache: "no-store", signal: AbortSignal.timeout(8_000) }),
-        fetch(`${BINANCE_API}/fapi/v1/trades?${tradesQuery}`, { cache: "no-store", signal: AbortSignal.timeout(8_000) }),
-      ]);
-      if (!bookResponse.ok || !tradesResponse.ok) {
-        const binanceFailure = `Binance fallback returned HTTP ${!bookResponse.ok ? bookResponse.status : tradesResponse.status}`;
-        const product = coinbaseSpotProduct(symbol);
-        if (!product) return jsonError(`Bybit failed (${bybitFailure}); ${binanceFailure}; no Coinbase spot mapping exists for ${symbol}`, 502);
-        exchange = "coinbase";
-        category = "spot";
-        marketSymbol = product;
-        const productPath = `/products/${encodeURIComponent(product)}`;
-        const [coinbaseBookResponse, coinbaseTradesResponse] = await Promise.all([
-          fetch(`${COINBASE_API}${productPath}/book?level=2`, { cache: "no-store", signal: AbortSignal.timeout(8_000) }),
-          fetch(`${COINBASE_API}${productPath}/trades?limit=${TRADE_LIMIT}`, { cache: "no-store", signal: AbortSignal.timeout(8_000) }),
-        ]);
-        if (!coinbaseBookResponse.ok || !coinbaseTradesResponse.ok) {
-          return jsonError(`Bybit failed (${bybitFailure}); ${binanceFailure}; Coinbase spot fallback for ${product} returned HTTP ${!coinbaseBookResponse.ok ? coinbaseBookResponse.status : coinbaseTradesResponse.status}`, 502);
-        }
-        const [book, trades] = await Promise.all([
-          coinbaseBookResponse.json() as Promise<CoinbaseBook>,
-          coinbaseTradesResponse.json() as Promise<CoinbaseTrade[]>,
-        ]);
-        if (!book || !Array.isArray(book.bids) || !Array.isArray(book.asks) || !Array.isArray(trades)) {
-          return jsonError(`Coinbase returned an incomplete spot snapshot for ${product}`, 502);
-        }
-        rawBids = book.bids;
-        rawAsks = book.asks;
-        // Coinbase trade side is the maker side; reverse it to estimate taker aggression.
-        rawTrades = trades.map((trade) => ({
-          price: trade.price, size: trade.size, timestamp: trade.time ? Date.parse(trade.time) : undefined,
-          side: trade.side === "buy" ? "sell" : trade.side === "sell" ? "buy" : undefined,
-        }));
-        exchangeTimestamp = book.time ? Date.parse(book.time) : 0;
-        tradeServerTime = Date.now();
-      } else {
-        const [book, trades] = await Promise.all([
-          bookResponse.json() as Promise<BinanceBook>,
-          tradesResponse.json() as Promise<BinanceTrade[]>,
-        ]);
-        if (!book || !Array.isArray(book.bids) || !Array.isArray(book.asks) || !Array.isArray(trades)) {
-          return jsonError("Binance returned an incomplete market snapshot", 502);
-        }
-        rawBids = book.bids;
-        rawAsks = book.asks;
-        rawTrades = trades.map((trade) => ({
-          price: trade.price, size: trade.qty, timestamp: trade.time,
-          side: trade.isBuyerMaker === true ? "sell" : trade.isBuyerMaker === false ? "buy" : undefined,
-        }));
-        // Binance USDⓈ-M depth transaction time is measured in milliseconds.
-        exchangeTimestamp = Number(book.T);
-        tradeServerTime = Date.now();
-      }
-    }
-
+    const exchange = snapshot.exchange as "bybit" | "binance" | "coinbase";
+    const category = snapshot.category as "linear" | "spot";
+    const marketSymbol = snapshot.symbol as string;
+    const rawBids: unknown = snapshot.bids;
+    const rawAsks: unknown = snapshot.asks;
+    const rawTrades = snapshot.trades as NormalizedTrade[];
+    const exchangeTimestamp = snapshot.exchange_timestamp as number;
+    const tradeServerTime = snapshot.trade_server_time as number;
     const bids = parseLevels(rawBids).sort((left, right) => right.price - left.price);
     const asks = parseLevels(rawAsks).sort((left, right) => left.price - right.price);
     const fetchedAt = Date.now();
@@ -399,6 +298,6 @@ export async function POST(request: Request) {
     return NextResponse.json(payload, { headers: { "Cache-Control": "no-store, private" } });
   } catch (error) {
       console.error("On-demand market refresh failed", error);
-    return jsonError("Could not fetch a complete snapshot from Bybit, Binance, or Coinbase. Try refreshing again later.", 502);
+    return jsonError("Could not evaluate the public market snapshot. Refresh and try again.", 502);
   }
 }
