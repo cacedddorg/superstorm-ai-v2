@@ -38,6 +38,7 @@ export default function MarketStatus({ onSnapshot }: { onSnapshot: (payload: Mar
         previousSample.current = {
           symbol: payload.symbol,
           sample: {
+            exchange: payload.exchange,
             fetched_at: payload.fetched_at,
             best_bid: bid.price,
             best_bid_qty: bid.quantity,

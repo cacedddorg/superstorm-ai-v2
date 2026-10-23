@@ -3,7 +3,7 @@
 SUPERSTORM AI is a private, single-user cryptocurrency market-research prototype. It consumes free public exchange market data and exposes exploratory strategy heuristics. It is not a verified profitable trading system and does not place orders or implement paper-trade execution.
 
 ## Overview
-The dashboard now fetches a fresh public Bybit snapshot only when you press **Fetch snapshot** or **Refresh snapshot**. Its Next.js server route requests the public REST order book and recent trades, then calculates the available research features. The Python FastAPI/WebSocket engine remains a separate optional continuous-feed implementation and is not required by the refresh-based dashboard.
+The dashboard fetches a fresh public market snapshot only when you press **Fetch snapshot** or **Refresh snapshot**. Its Next.js server route tries Bybit first, then uses Binance USDⓈ-M Futures public REST endpoints if Bybit is unavailable, and calculates the available research features. The exchange used for each result is shown in the dashboard. The Python FastAPI/WebSocket engine remains a separate optional continuous-feed implementation and is not required by the refresh-based dashboard.
 
 ## Project Structure
 - `apps/web`: Next.js frontend with Tailwind CSS and TradingView charts.
@@ -13,7 +13,7 @@ The dashboard now fetches a fresh public Bybit snapshot only when you press **Fe
 ## Vercel and private-use restrictions
 Vercel Hobby is intended for personal, non-commercial use. This application is trading-related; do not assume it qualifies. Confirm eligibility against Vercel's current terms before connecting GitHub or deploying. This repository does not deploy automatically or enable paid services.
 
-If approved later, set the Vercel root directory to `apps/web` and configure `AUTH_USER` and `AUTH_PASSWORD`. The single-user Basic Auth proxy also protects the on-demand market API route. Refresh requests call Bybit's public REST endpoints from the server; no exchange API key or separate always-on service is needed for this mode. Confirm Vercel Hobby eligibility before any deployment, especially for trading-related use. This repository does not deploy automatically or enable paid services.
+If approved later, set the Vercel root directory to `apps/web` and configure `AUTH_USER` and `AUTH_PASSWORD`. The single-user Basic Auth proxy also protects the on-demand market API route. Refresh requests use public exchange REST endpoints from the server; no exchange API key or separate always-on service is needed for this mode. Confirm Vercel Hobby eligibility before any deployment, especially for trading-related use. This repository does not deploy automatically or enable paid services.
 
 Refresh mode is deliberately snapshot-based: order-book flow between refreshes is only approximated from two snapshots in the current browser session; Strategy B remains unavailable because it requires sweep/reclaim history. Trade history is limited by the exchange response, and truncated samples suppress affected candidates. This mode does not claim continuous-feed quality.
 
