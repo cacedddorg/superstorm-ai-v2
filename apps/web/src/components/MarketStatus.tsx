@@ -36,7 +36,7 @@ export default function MarketStatus({ onSnapshot }: { onSnapshot: (payload: Mar
         const bid = payload.orderbook.bids[0];
         const ask = payload.orderbook.asks[0];
         previousSample.current = {
-          symbol: payload.symbol,
+          symbol: requestedSymbol,
           sample: {
             exchange: payload.exchange,
             fetched_at: payload.fetched_at,
@@ -66,14 +66,14 @@ export default function MarketStatus({ onSnapshot }: { onSnapshot: (payload: Mar
       </div>
 
       <form onSubmit={refresh} className="mb-4 flex flex-wrap gap-2">
-        <label htmlFor="market-symbol" className="sr-only">Linear perpetual symbol</label>
+        <label htmlFor="market-symbol" className="sr-only">Market symbol</label>
         <input
           id="market-symbol"
           value={symbol}
           onChange={(event) => setSymbol(event.target.value.toUpperCase())}
           maxLength={20}
           pattern="[A-Z0-9]{3,20}"
-          title="Use an exchange symbol such as BTCUSDT"
+          title="Use a symbol such as BTCUSDT; Coinbase fallback uses the matching USD spot product"
           className="min-w-0 flex-1 rounded border border-gray-700 bg-black px-3 py-2 font-mono text-sm text-white"
         />
         <button
@@ -96,7 +96,7 @@ export default function MarketStatus({ onSnapshot }: { onSnapshot: (payload: Mar
       ) : (
         <>
           <div className="mb-5 grid grid-cols-2 gap-3 text-sm">
-            <Metric label="Market" value={`${status.exchange} · ${status.symbol}`} />
+            <Metric label="Market" value={`${status.exchange} · ${status.symbol} · ${status.category}`} />
             <Metric label="Book quality" value={status.quality.quality} />
             <Metric label="Snapshot age" value={status.data_age_ms >= 0 ? `${status.data_age_ms} ms` : "Clock skew detected"} />
             <Metric label="Trade sample" value={`${status.trade_sample.returned}/${status.trade_sample.limit} recent trades`} />
@@ -133,7 +133,7 @@ export default function MarketStatus({ onSnapshot }: { onSnapshot: (payload: Mar
           </div>
 
           <p className="mt-5 text-xs leading-relaxed text-gray-500">
-            Data is requested from Bybit only when you press Refresh. These are unvalidated research heuristics, not recommendations or execution instructions. REST snapshots do not reproduce a continuous feed; missing or limited measurements are labelled above.
+            Data is requested only when you press Refresh. Coinbase fallback uses a USD spot product and can differ from the requested USDT perpetual market. These are unvalidated research heuristics, not recommendations or execution instructions. REST snapshots do not reproduce a continuous feed; missing or limited measurements are labelled above.
           </p>
         </>
       )}

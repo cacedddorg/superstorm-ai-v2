@@ -3,7 +3,7 @@
 SUPERSTORM AI is a private, single-user cryptocurrency market-research prototype. It consumes free public exchange market data and exposes exploratory strategy heuristics. It is not a verified profitable trading system and does not place orders or implement paper-trade execution.
 
 ## Overview
-The dashboard fetches a fresh public market snapshot only when you press **Fetch snapshot** or **Refresh snapshot**. Its Next.js server route tries Bybit first, then uses Binance USDⓈ-M Futures public REST endpoints if Bybit is unavailable, and calculates the available research features. The exchange used for each result is shown in the dashboard. The Python FastAPI/WebSocket engine remains a separate optional continuous-feed implementation and is not required by the refresh-based dashboard.
+The dashboard fetches a fresh public market snapshot only when you press **Fetch snapshot** or **Refresh snapshot**. Its Next.js server route tries Bybit first, then Binance USDⓈ-M Futures, then Coinbase Exchange public market-data endpoints. If it falls back to Coinbase, a request such as `BTCUSDT` maps to the Coinbase `BTC-USD` spot product. The returned product and `spot` category are shown explicitly: this is a different venue and market from the requested USDT perpetual contract. The route never presents it as equivalent perpetual data. The Python FastAPI/WebSocket engine remains a separate optional continuous-feed implementation and is not required by the refresh-based dashboard.
 
 ## Project Structure
 - `apps/web`: Next.js frontend with Tailwind CSS and TradingView charts.
