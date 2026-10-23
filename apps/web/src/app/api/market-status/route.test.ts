@@ -1,11 +1,27 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { POST } from "./route";
 
-function response(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
+const authorization = `Basic ${Buffer.from("researcher:test-password").toString("base64")}`;
+
+function request(body: unknown): Request {
+  return new Request("http://localhost/api/market-status", {
+    method: "POST",
+    headers: { Authorization: authorization, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
+}
+
+function linearSnapshot(exchange: "bybit" | "binance" = "bybit", now = Date.now()) {
+  return {
+    exchange,
+    category: "linear",
+    symbol: "BTCUSDT",
+    bids: [["100", "2"], ["99", "1"]],
+    asks: [["101", "3"], ["102", "1"]],
+    trades: [{ price: "100", size: "1", timestamp: now - 50, side: "buy" }],
+    exchange_timestamp: now - 100,
+    trade_server_time: now,
+  };
 }
 
 describe("POST /api/market-status", () => {
@@ -14,78 +30,61 @@ describe("POST /api/market-status", () => {
     vi.unstubAllEnvs();
   });
 
-  it("falls back to Binance after Bybit is denied and reports Binance as the source", async () => {
+  it("evaluates an authenticated Bybit snapshot without making server-side exchange calls", async () => {
     const now = Date.now();
     vi.stubEnv("AUTH_USER", "researcher");
     vi.stubEnv("AUTH_PASSWORD", "test-password");
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.startsWith("https://api.bybit.com/")) return response({ error: "Forbidden" }, 403);
-      if (url.includes("/fapi/v1/depth")) {
-        return response({
-          T: now - 100,
-          bids: [["100", "2"], ["99", "1"]],
-          asks: [["101", "3"], ["102", "1"]],
-        });
-      }
-      if (url.includes("/fapi/v1/trades")) {
-        return response([{ price: "100", qty: "1", time: now - 50, isBuyerMaker: false }]);
-      }
-      throw new Error(`Unexpected market endpoint: ${url}`);
-    });
+    const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
-    const authorization = `Basic ${Buffer.from("researcher:test-password").toString("base64")}`;
-    const result = await POST(new Request("http://localhost/api/market-status", {
-      method: "POST",
-      headers: { Authorization: authorization, "Content-Type": "application/json" },
-      body: JSON.stringify({ symbol: "BTCUSDT" }),
-    }));
+    const result = await POST(request({ symbol: "BTCUSDT", snapshot: linearSnapshot("bybit", now) }));
 
     expect(result.status).toBe(200);
     const payload = await result.json();
-    expect(payload.exchange).toBe("binance");
+    expect(payload.exchange).toBe("bybit");
+    expect(payload.category).toBe("linear");
     expect(payload.exchange_timestamp).toBe(now - 100);
     expect(payload.orderbook.bids[0]).toEqual({ price: 100, quantity: 2 });
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("uses Coinbase USD spot data after Bybit and Binance are blocked, and labels the actual market", async () => {
+  it("accepts and explicitly labels Coinbase USD spot data", async () => {
     const now = Date.now();
     vi.stubEnv("AUTH_USER", "researcher");
     vi.stubEnv("AUTH_PASSWORD", "test-password");
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.startsWith("https://api.bybit.com/")) return response({ error: "Forbidden" }, 403);
-      if (url.startsWith("https://fapi.binance.com/")) return response({ error: "Unavailable in region" }, 451);
-      if (url === "https://api.exchange.coinbase.com/products/BTC-USD/book?level=2") {
-        return response({
-          time: new Date(now - 100).toISOString(),
-          bids: [["50000", "2", 1], ["49999", "1", 1]],
-          asks: [["50001", "3", 1], ["50002", "1", 1]],
-        });
-      }
-      if (url === "https://api.exchange.coinbase.com/products/BTC-USD/trades?limit=100") {
-        return response([{ price: "50000", size: "1", time: new Date(now - 50).toISOString(), side: "sell" }]);
-      }
-      throw new Error(`Unexpected market endpoint: ${url}`);
-    });
-    vi.stubGlobal("fetch", fetchMock);
+    const snapshot = {
+      ...linearSnapshot("bybit", now),
+      exchange: "coinbase",
+      category: "spot",
+      symbol: "BTC-USD",
+      bids: [["50000", "2"]],
+      asks: [["50001", "3"]],
+      exchange_timestamp: now - 100,
+    };
 
-    const authorization = `Basic ${Buffer.from("researcher:test-password").toString("base64")}`;
-    const result = await POST(new Request("http://localhost/api/market-status", {
-      method: "POST",
-      headers: { Authorization: authorization, "Content-Type": "application/json" },
-      body: JSON.stringify({ symbol: "BTCUSDT" }),
-    }));
+    const result = await POST(request({ symbol: "BTCUSDT", snapshot }));
 
     expect(result.status).toBe(200);
     const payload = await result.json();
     expect(payload.exchange).toBe("coinbase");
     expect(payload.category).toBe("spot");
     expect(payload.symbol).toBe("BTC-USD");
-    expect(payload.exchange_timestamp).toBe(now - 100);
-    expect(payload.orderbook.bids[0]).toEqual({ price: 50000, quantity: 2 });
-    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
+  it("rejects snapshots that mislabel the market or symbol", async () => {
+    vi.stubEnv("AUTH_USER", "researcher");
+    vi.stubEnv("AUTH_PASSWORD", "test-password");
+
+    const wrongSymbol = await POST(request({
+      symbol: "BTCUSDT",
+      snapshot: { ...linearSnapshot(), symbol: "ETHUSDT" },
+    }));
+    const wrongCategory = await POST(request({
+      symbol: "BTCUSDT",
+      snapshot: { ...linearSnapshot(), exchange: "coinbase", category: "linear", symbol: "BTC-USD" },
+    }));
+
+    expect(wrongSymbol.status).toBe(400);
+    expect(wrongCategory.status).toBe(400);
   });
 });
