@@ -11,6 +11,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const BYBIT_API = "https://api.bybit.com";
+const BINANCE_API = "https://fapi.binance.com";
 const BOOK_LIMIT = 50;
 const TRADE_LIMIT = 100;
 const MAX_BOOK_AGE_MS = 15_000;
@@ -38,6 +39,19 @@ type BybitTrade = {
   time?: string;
 };
 
+type BinanceBook = {
+  bids?: [string, string][];
+  asks?: [string, string][];
+  T?: number;
+};
+
+type BinanceTrade = {
+  price?: string;
+  qty?: string;
+  time?: number;
+  isBuyerMaker?: boolean;
+};
+
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, {
     status,
@@ -57,9 +71,10 @@ function parseLevels(raw: unknown): OrderBookLevel[] {
   });
 }
 
-function validPreviousSample(value: unknown, now: number): PreviousBookSample | null {
+function validPreviousSample(value: unknown, now: number, exchange: "bybit" | "binance"): PreviousBookSample | null {
   if (!value || typeof value !== "object") return null;
   const sample = value as Partial<PreviousBookSample>;
+  if (sample.exchange !== exchange) return null;
   const fields = [sample.fetched_at, sample.best_bid, sample.best_bid_qty, sample.best_ask, sample.best_ask_qty];
   if (!fields.every((field) => typeof field === "number" && Number.isFinite(field))) return null;
   if (
@@ -113,37 +128,75 @@ export async function POST(request: Request) {
   const symbol = typeof input.symbol === "string" ? input.symbol.trim().toUpperCase() : "BTCUSDT";
   if (!/^[A-Z0-9]{3,20}$/.test(symbol)) return jsonError("Invalid market symbol", 400);
 
-  const query = new URLSearchParams({ category: "linear", symbol, limit: String(BOOK_LIMIT) });
-  const tradesQuery = new URLSearchParams({ category: "linear", symbol, limit: String(TRADE_LIMIT) });
   try {
-    const [bookResponse, tradesResponse] = await Promise.all([
-      fetch(`${BYBIT_API}/v5/market/orderbook?${query}`, {
-        cache: "no-store",
-        signal: AbortSignal.timeout(8_000),
-      }),
-      fetch(`${BYBIT_API}/v5/market/recent-trade?${tradesQuery}`, {
-        cache: "no-store",
-        signal: AbortSignal.timeout(8_000),
-      }),
-    ]);
-    if (!bookResponse.ok || !tradesResponse.ok) {
-      return jsonError(`Bybit market data returned HTTP ${!bookResponse.ok ? bookResponse.status : tradesResponse.status}`, 502);
+    type NormalizedTrade = { price?: string; size?: string; timestamp?: string | number; side?: string };
+    let exchange: "bybit" | "binance" = "bybit";
+    let rawBids: unknown;
+    let rawAsks: unknown;
+    let rawTrades: NormalizedTrade[] = [];
+    let exchangeTimestamp = 0;
+    let tradeServerTime = 0;
+    let bybitFailure = "Bybit market data is unavailable";
+
+    try {
+      const query = new URLSearchParams({ category: "linear", symbol, limit: String(BOOK_LIMIT) });
+      const tradesQuery = new URLSearchParams({ category: "linear", symbol, limit: String(TRADE_LIMIT) });
+      const [bookResponse, tradesResponse] = await Promise.all([
+        fetch(`${BYBIT_API}/v5/market/orderbook?${query}`, { cache: "no-store", signal: AbortSignal.timeout(8_000) }),
+        fetch(`${BYBIT_API}/v5/market/recent-trade?${tradesQuery}`, { cache: "no-store", signal: AbortSignal.timeout(8_000) }),
+      ]);
+      if (!bookResponse.ok || !tradesResponse.ok) {
+        throw new Error(`Bybit HTTP ${!bookResponse.ok ? bookResponse.status : tradesResponse.status}`);
+      }
+      const [bookEnvelope, tradesEnvelope] = await Promise.all([
+        bookResponse.json() as Promise<BybitEnvelope<BybitBook>>,
+        tradesResponse.json() as Promise<BybitEnvelope<{ list?: BybitTrade[] }>>,
+      ]);
+      if (bookEnvelope.retCode !== 0 || tradesEnvelope.retCode !== 0 || !bookEnvelope.result || !tradesEnvelope.result) {
+        throw new Error("Bybit returned an incomplete market snapshot");
+      }
+      rawBids = bookEnvelope.result.b;
+      rawAsks = bookEnvelope.result.a;
+      rawTrades = (tradesEnvelope.result.list ?? []).map((trade) => ({
+        price: trade.price, size: trade.size, timestamp: trade.time, side: trade.side,
+      }));
+      exchangeTimestamp = Number(bookEnvelope.result.ts);
+      tradeServerTime = Number(tradesEnvelope.time);
+    } catch (cause) {
+      bybitFailure = cause instanceof Error ? cause.message : bybitFailure;
+      exchange = "binance";
+      const query = new URLSearchParams({ symbol, limit: String(BOOK_LIMIT) });
+      const tradesQuery = new URLSearchParams({ symbol, limit: String(TRADE_LIMIT) });
+      const [bookResponse, tradesResponse] = await Promise.all([
+        fetch(`${BINANCE_API}/fapi/v1/depth?${query}`, { cache: "no-store", signal: AbortSignal.timeout(8_000) }),
+        fetch(`${BINANCE_API}/fapi/v1/trades?${tradesQuery}`, { cache: "no-store", signal: AbortSignal.timeout(8_000) }),
+      ]);
+      if (!bookResponse.ok || !tradesResponse.ok) {
+        return jsonError(`Bybit failed (${bybitFailure}); Binance fallback returned HTTP ${!bookResponse.ok ? bookResponse.status : tradesResponse.status}`, 502);
+      }
+      const [book, trades] = await Promise.all([
+        bookResponse.json() as Promise<BinanceBook>,
+        tradesResponse.json() as Promise<BinanceTrade[]>,
+      ]);
+      if (!book || !Array.isArray(book.bids) || !Array.isArray(book.asks) || !Array.isArray(trades)) {
+        return jsonError("Binance returned an incomplete market snapshot", 502);
+      }
+      rawBids = book.bids;
+      rawAsks = book.asks;
+      rawTrades = trades.map((trade) => ({
+        price: trade.price, size: trade.qty, timestamp: trade.time,
+        side: trade.isBuyerMaker === true ? "sell" : trade.isBuyerMaker === false ? "buy" : undefined,
+      }));
+      // Binance's USDⓈ-M depth response includes transaction time T, measured in milliseconds.
+      exchangeTimestamp = Number(book.T);
+      tradeServerTime = Date.now();
     }
 
-    const [bookEnvelope, tradesEnvelope] = await Promise.all([
-      bookResponse.json() as Promise<BybitEnvelope<BybitBook>>,
-      tradesResponse.json() as Promise<BybitEnvelope<{ list?: BybitTrade[] }>>,
-    ]);
-    if (bookEnvelope.retCode !== 0 || tradesEnvelope.retCode !== 0 || !bookEnvelope.result || !tradesEnvelope.result) {
-      return jsonError("Bybit did not provide a complete order-book and trade snapshot", 502);
-    }
-
-    const bids = parseLevels(bookEnvelope.result.b).sort((left, right) => right.price - left.price);
-    const asks = parseLevels(bookEnvelope.result.a).sort((left, right) => left.price - right.price);
+    const bids = parseLevels(rawBids).sort((left, right) => right.price - left.price);
+    const asks = parseLevels(rawAsks).sort((left, right) => left.price - right.price);
     const fetchedAt = Date.now();
-    const exchangeTimestamp = Number(bookEnvelope.result.ts);
     if (!Number.isFinite(exchangeTimestamp) || exchangeTimestamp <= 0) {
-      return jsonError("Bybit order-book timestamp is missing or invalid", 502);
+      return jsonError(`${exchange === "bybit" ? "Bybit" : "Binance"} order-book timestamp is missing or invalid`, 502);
     }
     const dataAgeMs = fetchedAt - exchangeTimestamp;
     const bestBid = bids[0];
@@ -153,14 +206,12 @@ export async function POST(request: Request) {
       Number.isFinite(dataAgeMs) && dataAgeMs >= 0 && dataAgeMs <= MAX_BOOK_AGE_MS
     );
 
-    if (!bestBid || !bestAsk) return jsonError("Bybit returned an empty or malformed order book", 502);
-    const tradeRows = Array.isArray(tradesEnvelope.result.list) ? tradesEnvelope.result.list : [];
-    const tradeServerTime = Number(tradesEnvelope.time);
+    if (!bestBid || !bestAsk) return jsonError(`${exchange === "bybit" ? "Bybit" : "Binance"} returned an empty or malformed order book`, 502);
     const timeForTradeWindow = Number.isFinite(tradeServerTime) ? tradeServerTime : fetchedAt;
-    const validTrades = tradeRows.flatMap((trade) => {
+    const validTrades = rawTrades.flatMap((trade) => {
       const price = Number(trade.price);
       const size = Number(trade.size);
-      const timestamp = Number(trade.time);
+      const timestamp = Number(trade.timestamp);
       const side = trade.side?.toLowerCase();
       return Number.isFinite(price) && price > 0 && Number.isFinite(size) && size > 0 &&
         Number.isFinite(timestamp) && (side === "buy" || side === "sell")
@@ -170,8 +221,8 @@ export async function POST(request: Request) {
     const tradesInLastSecond = validTrades.filter(
       (trade) => trade.timestamp <= timeForTradeWindow && trade.timestamp >= timeForTradeWindow - 1_000,
     ).length;
-    const tradeSampleQuality = tradeRows.length >= TRADE_LIMIT ? "SAMPLED_LIMIT_REACHED" : "SAMPLED";
-    const prior = validPreviousSample(input.previous_sample, fetchedAt);
+    const tradeSampleQuality = rawTrades.length >= TRADE_LIMIT ? "SAMPLED_LIMIT_REACHED" : "SAMPLED";
+    const prior = validPreviousSample(input.previous_sample, fetchedAt, exchange);
 
     const cvd = validTrades.reduce(
       (sum, trade) => sum + (trade.side === "buy" ? trade.size : -trade.size),
@@ -284,10 +335,10 @@ export async function POST(request: Request) {
 
     const quality = !bookValid
       ? { safe: false, quality: dataAgeMs > MAX_BOOK_AGE_MS ? "STALE" : "POOR", reason: "Snapshot is crossed, stale, malformed, or has a clock inconsistency", data_age_ms: dataAgeMs }
-      : { safe: true, quality: "GOOD", reason: "Fresh valid Bybit linear order-book snapshot", data_age_ms: dataAgeMs };
+      : { safe: true, quality: "GOOD", reason: `Fresh valid ${exchange === "bybit" ? "Bybit" : "Binance USDⓈ-M"} order-book snapshot`, data_age_ms: dataAgeMs };
     const payload: MarketStatusPayload = {
       symbol,
-      exchange: "bybit",
+      exchange,
       category: "linear",
       fetched_at: fetchedAt,
       exchange_timestamp: exchangeTimestamp,
@@ -306,7 +357,7 @@ export async function POST(request: Request) {
     };
     return NextResponse.json(payload, { headers: { "Cache-Control": "no-store, private" } });
   } catch (error) {
-    console.error("On-demand Bybit market refresh failed", error);
-    return jsonError("Could not fetch a complete snapshot from Bybit. Try refreshing again later.", 502);
+      console.error("On-demand market refresh failed", error);
+    return jsonError("Could not fetch a complete snapshot from Bybit or Binance. Try refreshing again later.", 502);
   }
 }

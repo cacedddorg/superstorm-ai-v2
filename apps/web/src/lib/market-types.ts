@@ -16,6 +16,7 @@ export type StrategyExplanation = {
 export type OrderBookLevel = { price: number; quantity: number };
 
 export type PreviousBookSample = {
+  exchange: "bybit" | "binance";
   fetched_at: number;
   best_bid: number;
   best_bid_qty: number;
@@ -25,7 +26,7 @@ export type PreviousBookSample = {
 
 export type MarketStatusPayload = {
   symbol: string;
-  exchange: "bybit";
+  exchange: "bybit" | "binance";
   category: "linear";
   fetched_at: number;
   exchange_timestamp: number;
