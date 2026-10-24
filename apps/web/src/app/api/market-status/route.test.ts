@@ -19,6 +19,10 @@ function linearSnapshot(exchange: "bybit" | "binance" = "bybit", now = Date.now(
     bids: [["100", "2"], ["99", "1"]],
     asks: [["101", "3"], ["102", "1"]],
     trades: [{ price: "100", size: "1", timestamp: now - 50, side: "buy" }],
+    recent_trade_count: 1,
+    trade_limit: 1_000,
+    candles: [],
+    timestamp_source: "orderbook" as const,
     exchange_timestamp: now - 100,
     trade_server_time: now,
   };
@@ -87,4 +91,51 @@ describe("POST /api/market-status", () => {
     expect(wrongSymbol.status).toBe(400);
     expect(wrongCategory.status).toBe(400);
   });
+
+  it("uses historical candles and trade samples so first-refresh A and B are evaluable", async () => {
+    const now = Date.now();
+    vi.stubEnv("AUTH_USER", "researcher");
+    vi.stubEnv("AUTH_PASSWORD", "test-password");
+    const candleStart = Math.floor(now / 60_000) * 60_000 - 60 * 60_000;
+    const snapshot = {
+      ...linearSnapshot("bybit", now),
+      recent_trade_count: 40,
+      candles: Array.from({ length: 60 }, (_, index) => ({
+        open_time: candleStart + index * 60_000,
+        open: 100 + index * 0.02,
+        high: 101 + index * 0.02,
+        low: 99 + index * 0.02,
+        close: 100.2 + index * 0.02,
+        volume: 10,
+      })),
+    };
+
+    const result = await POST(request({ symbol: "BTCUSDT", snapshot }));
+    const payload = await result.json();
+    const strategyA = payload.strategies.find((strategy: { strategy_name: string }) => strategy.strategy_name.includes("Strategy A"));
+    const strategyB = payload.strategies.find((strategy: { strategy_name: string }) => strategy.strategy_name.includes("Strategy B"));
+
+    expect(result.status).toBe(200);
+    expect(strategyA.data_quality).toBe("GOOD");
+    expect(strategyA.missing_inputs).not.toContain("prior_orderbook_sample_within_60_seconds");
+    expect(strategyB.strategy_name).toContain("Sweep/Reclaim Proxy");
+    expect(strategyB.data_quality).toBe("GOOD");
+  });
+
+  it("marks a saturated public trade batch incomplete instead of treating it as complete", async () => {
+    const now = Date.now();
+    vi.stubEnv("AUTH_USER", "researcher");
+    vi.stubEnv("AUTH_PASSWORD", "test-password");
+
+    const result = await POST(request({
+      symbol: "BTCUSDT",
+      snapshot: { ...linearSnapshot("bybit", now), recent_trade_count: 1_000, trade_limit: 1_000 },
+    }));
+    const payload = await result.json();
+
+    expect(result.status).toBe(200);
+    expect(payload.trade_sample.quality).toBe("SAMPLED_LIMIT_REACHED");
+    expect(payload.strategies[0].data_quality).toBe("INCOMPLETE");
+  });
 });
+
