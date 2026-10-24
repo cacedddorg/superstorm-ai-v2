@@ -1,4 +1,4 @@
-import type { MarketCandle, MarketSnapshotInput } from "./market-types";
+import type { MarketCandle, MarketCategory, MarketExchange, MarketSnapshotInput } from "./market-types";
 
 const BYBIT_API = "https://api.bybit.com";
 const BINANCE_API = "https://fapi.binance.com";
@@ -7,6 +7,7 @@ const BOOK_LIMIT = 50;
 const TRADE_LIMIT = 1_000;
 const COINBASE_TRADE_LIMIT = 100;
 const CANDLE_LIMIT = 60;
+const SPOT_BINANCE_API = "https://data-api.binance.vision";
 
 type BybitResponse<T> = { retCode?: number; retMsg?: string; time?: number; result?: T };
 type BybitBook = { b?: [string, string][]; a?: [string, string][]; ts?: number };
@@ -82,15 +83,22 @@ function bybitCandles(response: BybitResponse<{ list?: BybitKline[] }> | null): 
   }).sort((left, right) => left.open_time - right.open_time);
 }
 
-export async function fetchPublicMarketSnapshot(requestedSymbol: string): Promise<MarketSnapshotInput> {
+export async function fetchPublicMarketSnapshot(
+  requestedSymbol: string,
+  category: MarketCategory = "linear",
+  preferredExchanges: MarketExchange[] = ["bybit", "binance", "coinbase"],
+): Promise<MarketSnapshotInput> {
   const symbol = requestedSymbol.trim().toUpperCase();
   if (!/^[A-Z0-9]{3,20}$/.test(symbol)) throw new Error("Invalid market symbol");
+  const exchangeOrder = [...new Set(preferredExchanges)].filter((exchange) => exchange !== "coinbase" || category === "spot");
+  if (!exchangeOrder.length) throw new Error("Select at least one exchange that supports this market type");
   const failures: string[] = [];
 
-  try {
-    const query = new URLSearchParams({ category: "linear", symbol, limit: String(BOOK_LIMIT) });
-    const tradesQuery = new URLSearchParams({ category: "linear", symbol, limit: String(TRADE_LIMIT) });
-    const candlesQuery = new URLSearchParams({ category: "linear", symbol, interval: "1", limit: String(CANDLE_LIMIT) });
+  if (exchangeOrder.includes("bybit")) try {
+    const marketCategory = category === "spot" ? "spot" : "linear";
+    const query = new URLSearchParams({ category: marketCategory, symbol, limit: String(BOOK_LIMIT) });
+    const tradesQuery = new URLSearchParams({ category: marketCategory, symbol, limit: String(TRADE_LIMIT) });
+    const candlesQuery = new URLSearchParams({ category: marketCategory, symbol, interval: "1", limit: String(CANDLE_LIMIT) });
     const [bookResponse, tradeResponse, candleResponse] = await Promise.all([
       checkedJson<BybitResponse<BybitBook>>(`${BYBIT_API}/v5/market/orderbook?${query}`, "Bybit"),
       checkedJson<BybitResponse<{ list?: BybitTrade[] }>>(`${BYBIT_API}/v5/market/recent-trade?${tradesQuery}`, "Bybit"),
@@ -100,7 +108,7 @@ export async function fetchPublicMarketSnapshot(requestedSymbol: string): Promis
     const tradeData = requireBybitSuccess(tradeResponse, "Bybit recent trades");
     if (!Array.isArray(book.b) || !Array.isArray(book.a) || !book.ts) throw new Error("Bybit returned an incomplete order book");
     return {
-      exchange: "bybit", category: "linear", symbol,
+      exchange: "bybit", category, symbol,
       bids: book.b.slice(0, BOOK_LIMIT), asks: book.a.slice(0, BOOK_LIMIT),
       // A malformed trade row must not invalidate an otherwise good book.
       // Keep only fully usable rows so NaN cannot serialize to null and fail
@@ -119,21 +127,23 @@ export async function fetchPublicMarketSnapshot(requestedSymbol: string): Promis
     failures.push(error instanceof Error ? error.message : "Bybit request failed");
   }
 
-  try {
+  if (exchangeOrder.includes("binance")) try {
     const query = new URLSearchParams({ symbol, limit: String(BOOK_LIMIT) });
     const tradesQuery = new URLSearchParams({ symbol, limit: String(TRADE_LIMIT) });
     const candlesQuery = new URLSearchParams({ symbol, interval: "1m", limit: String(CANDLE_LIMIT) });
+    const productPath = category === "spot" ? "/api/v3" : "/fapi/v1";
+    const binanceApi = category === "spot" ? SPOT_BINANCE_API : BINANCE_API;
     const [book, trades, exchangeTime, rawCandles] = await Promise.all([
-      checkedJson<BinanceBook>(`${BINANCE_API}/fapi/v1/depth?${query}`, "Binance USDⓈ-M"),
-      checkedJson<BinanceTrade[]>(`${BINANCE_API}/fapi/v1/trades?${tradesQuery}`, "Binance USDⓈ-M"),
-      checkedJson<BinanceTime>(`${BINANCE_API}/fapi/v1/time`, "Binance USDⓈ-M time"),
-      checkedJson<BinanceCandle[]>(`${BINANCE_API}/fapi/v1/klines?${candlesQuery}`, "Binance USDⓈ-M candles").catch(() => []),
+      checkedJson<BinanceBook>(`${binanceApi}${productPath}/depth?${query}`, category === "spot" ? "Binance spot" : "Binance USDⓈ-M"),
+      checkedJson<BinanceTrade[]>(`${binanceApi}${productPath}/trades?${tradesQuery}`, category === "spot" ? "Binance spot" : "Binance USDⓈ-M"),
+      checkedJson<BinanceTime>(`${binanceApi}${productPath}/time`, category === "spot" ? "Binance spot time" : "Binance USDⓈ-M time"),
+      checkedJson<BinanceCandle[]>(`${binanceApi}${productPath}/klines?${candlesQuery}`, category === "spot" ? "Binance spot candles" : "Binance USDⓈ-M candles").catch(() => []),
     ]);
     if (!Array.isArray(book.bids) || !Array.isArray(book.asks) || !Array.isArray(trades) || !exchangeTime.serverTime) {
       throw new Error("Binance returned an incomplete market snapshot");
     }
     return {
-      exchange: "binance", category: "linear", symbol,
+      exchange: "binance", category, symbol,
       bids: book.bids.slice(0, BOOK_LIMIT), asks: book.asks.slice(0, BOOK_LIMIT),
       trades: trades.slice(0, TRADE_LIMIT).flatMap((trade) => {
         const side = trade.isBuyerMaker === true ? "sell" : trade.isBuyerMaker === false ? "buy" : undefined;
@@ -153,7 +163,8 @@ export async function fetchPublicMarketSnapshot(requestedSymbol: string): Promis
     failures.push(error instanceof Error ? error.message : "Binance request failed");
   }
 
-  const product = coinbaseSpotProduct(symbol);
+  const product = category === "spot" && exchangeOrder.includes("coinbase") ? coinbaseSpotProduct(symbol) : null;
+  if (!exchangeOrder.includes("coinbase") || category !== "spot") throw new Error(failures.join("; ") || "Selected exchanges did not return a valid public snapshot");
   if (!product) throw new Error(`${failures.join("; ")}; Coinbase has no safe USD spot mapping for ${symbol}`);
   try {
     const productPath = `/products/${encodeURIComponent(product)}`;

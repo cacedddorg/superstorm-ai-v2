@@ -18,6 +18,24 @@ function bybitKlines(now: number) {
 describe("fetchPublicMarketSnapshot", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it("fetches spot book, trades, and candles from the selected Bybit spot market", async () => {
+    const now = Date.now();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("orderbook")) return response({ retCode: 0, result: { ts: now, b: [["100", "2"]], a: [["101", "3"]] } });
+      if (url.includes("recent-trade")) return response({ retCode: 0, time: now, result: { list: [{ price: "100", size: "1", side: "Buy", time: String(now) }] } });
+      if (url.includes("/market/kline")) return response({ retCode: 0, result: { list: bybitKlines(now) } });
+      throw new Error(`Unexpected endpoint ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const snapshot = await fetchPublicMarketSnapshot("BTCUSDT", "spot", ["bybit"]);
+
+    expect(snapshot.exchange).toBe("bybit");
+    expect(snapshot.category).toBe("spot");
+    expect(fetchMock.mock.calls.every(([url]) => String(url).includes("category=spot"))).toBe(true);
+  });
+
   it("uses Bybit public data first", async () => {
     const now = Date.now();
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
@@ -86,12 +104,12 @@ describe("fetchPublicMarketSnapshot", () => {
     expect(fetchMock.mock.calls.length).toBe(7);
   });
 
-  it("falls back to the explicitly labeled Coinbase USD spot market when both futures sources fail", async () => {
+  it("falls back to the explicitly labeled Coinbase USD spot market when selected spot venues fail", async () => {
     const now = Date.now();
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.startsWith("https://api.bybit.com/")) return response({ message: "Blocked" }, 403);
-      if (url.startsWith("https://fapi.binance.com/")) return response({ msg: "Restricted" }, 451);
+      if (url.startsWith("https://data-api.binance.vision/")) return response({ msg: "Restricted" }, 451);
       if (url.endsWith("/products/BTC-USD/book?level=2")) {
         return response({ bids: [["50000", "2", 1]], asks: [["50001", "3", 1]] });
       }
@@ -104,7 +122,7 @@ describe("fetchPublicMarketSnapshot", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const snapshot = await fetchPublicMarketSnapshot("BTCUSDT");
+    const snapshot = await fetchPublicMarketSnapshot("BTCUSDT", "spot");
 
     expect(snapshot.exchange).toBe("coinbase");
     expect(snapshot.category).toBe("spot");
