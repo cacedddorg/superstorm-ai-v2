@@ -3,7 +3,11 @@
 SUPERSTORM AI is a private, single-user cryptocurrency market-research prototype. It consumes free public exchange market data and exposes exploratory strategy heuristics. It is not a verified profitable trading system and does not place orders or implement paper-trade execution.
 
 ## Overview
-The dashboard fetches a fresh public market snapshot only when you press **Fetch snapshot** or **Refresh snapshot**. The browser requests public data from Bybit first, Binance USDⓈ-M Futures second, and Coinbase Exchange third, then sends the bounded snapshot to the authenticated Next.js route for validation and strategy calculations. This makes exchange requests from the user's actual connection instead of Vercel's server region. It does not proxy or disguise the user's location; exchange restrictions still apply. If it falls back to Coinbase, a request such as `BTCUSDT` maps to the Coinbase `BTC-USD` spot product. The returned product and `spot` category are shown explicitly: this is a different venue and market from the requested USDT perpetual contract. The route never presents it as equivalent perpetual data. The Python FastAPI/WebSocket engine remains a separate optional continuous-feed implementation and is not required by the refresh-based dashboard.
+The dashboard requests public market data only when you press **Fetch snapshot** or **Refresh snapshot**. Choose Spot or linear Perpetual and select preferred strategy-data exchanges. The selected providers are tried in order until one returns a valid bounded snapshot; Coinbase is available for Spot only. The request comes from the user's browser, so exchanges see the user's actual connection and their regional restrictions still apply. A Coinbase USD spot market is never presented as a USDT perpetual market. The Python FastAPI/WebSocket engine remains separate and is not required by refresh mode.
+
+Each A/B/C strategy card can show a research entry reference and long/short stop and exit scenarios when at least 15 completed one-minute candles exist. Candidate direction selects the corresponding levels; otherwise both are explicitly marked as scenarios with no strategy candidate. Levels use a 14-candle ATR and prior 20-minute swing, with a 1.5R target. They are heuristic calculations, not validated forecasts, personalized advice, or order instructions.
+
+The market overview also compares last-trade prices from ten public venues for the selected market type and requests Bybit/Binance rolling 24-hour quote turnover. HIGH/LOW is a comparison with the mean of available completed daily candles over up to 30 days (minimum seven); it is not an absolute liquidity grade. Each venue's native instrument, quote currency, and request failure are shown. Spot, linear perpetual, inverse perpetual, and quote-currency prices are not interchangeable, and the price list is not a synchronized executable quote.
 
 ## Project Structure
 - `apps/web`: Next.js frontend with Tailwind CSS and TradingView charts.
@@ -19,3 +23,4 @@ Refresh mode is deliberately snapshot-based: order-book flow between refreshes i
 
 ## Getting Started Locally
 See `AGENTS.md` for setup commands and conventions. To run the frontend locally, create `apps/web/.env.local` with `AUTH_USER` and `AUTH_PASSWORD`, then run `npm run dev` from `apps/web`. The market snapshot route does not require the Python process.
+

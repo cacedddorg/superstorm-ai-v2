@@ -59,6 +59,7 @@ function makeStrategy(
   reason: string,
   candidate: "buy" | "sell" | null = null,
   ttlMs = 5_000,
+  trade_plan: StrategyExplanation["trade_plan"] = null,
 ): StrategyExplanation {
   return {
     strategy_name,
@@ -70,7 +71,42 @@ function makeStrategy(
     expiry: now + ttlMs,
     decision: candidate ? "actionable" : "no_trade",
     selected_candidate: candidate,
+    trade_plan,
     reason,
+  };
+}
+
+function scenarioPlan(
+  direction: "buy" | "sell" | null,
+  entry: number,
+  candles: MarketSnapshotInput["candles"],
+  swingLow: number | null,
+  swingHigh: number | null,
+): StrategyExplanation["trade_plan"] {
+  if (candles.length < 15 || entry <= 0) return null;
+  const recent = candles.slice(-15);
+  const trueRanges = recent.slice(1).map((candle, index) => {
+    const priorClose = recent[index].close;
+    return Math.max(candle.high - candle.low, Math.abs(candle.high - priorClose), Math.abs(candle.low - priorClose));
+  });
+  const atr = trueRanges.reduce((sum, value) => sum + value, 0) / trueRanges.length;
+  if (!Number.isFinite(atr) || atr <= 0) return null;
+  const longStop = Math.min(swingLow !== null && swingLow < entry ? swingLow : entry - atr, entry - atr * 0.25);
+  const shortStop = Math.max(swingHigh !== null && swingHigh > entry ? swingHigh : entry + atr, entry + atr * 0.25);
+  const longRisk = entry - longStop;
+  const shortRisk = shortStop - entry;
+  if (![longRisk, shortRisk].every((risk) => Number.isFinite(risk) && risk > 0)) return null;
+  return {
+    direction,
+    entry_price: entry,
+    stop_loss_price: direction === "buy" ? longStop : direction === "sell" ? shortStop : null,
+    exit_price: direction === "buy" ? entry + longRisk * 1.5 : direction === "sell" ? entry - shortRisk * 1.5 : null,
+    scenarios: {
+      long: { stop_loss_price: longStop, exit_price: entry + longRisk * 1.5 },
+      short: { stop_loss_price: shortStop, exit_price: entry - shortRisk * 1.5 },
+    },
+    risk_reward: 1.5,
+    method: "Research scenario from current bid/ask midpoint, 14-candle ATR and prior 20-minute swing; 1.5R target. Not an order instruction.",
   };
 }
 
@@ -96,7 +132,7 @@ export async function POST(request: Request) {
   const snapshot = input.snapshot as Partial<MarketSnapshotInput> | undefined;
   if (!snapshot || !["bybit", "binance", "coinbase"].includes(snapshot.exchange ?? "") ||
       !["linear", "spot"].includes(snapshot.category ?? "") ||
-      (snapshot.exchange === "coinbase") !== (snapshot.category === "spot") ||
+      (snapshot.exchange === "coinbase" && snapshot.category !== "spot") ||
       !["orderbook", "exchange_clock_estimate"].includes(snapshot.timestamp_source ?? "") ||
       typeof snapshot.symbol !== "string" || !/^[A-Z0-9]{3,20}(?:-USD)?$/.test(snapshot.symbol) ||
       !Array.isArray(snapshot.bids) || snapshot.bids.length > BOOK_LIMIT ||
@@ -153,17 +189,18 @@ export async function POST(request: Request) {
     const asks = parseLevels(rawAsks).sort((left, right) => left.price - right.price);
     const fetchedAt = Date.now();
     if (!Number.isFinite(exchangeTimestamp) || exchangeTimestamp <= 0) {
-      return jsonError(`${exchange === "bybit" ? "Bybit" : exchange === "binance" ? "Binance" : "Coinbase spot"} order-book timestamp is missing or invalid`, 502);
+      return jsonError(`${exchange === "bybit" ? "Bybit" : exchange === "binance" ? `Binance ${category}` : "Coinbase spot"} order-book timestamp is missing or invalid`, 502);
     }
     const dataAgeMs = fetchedAt - exchangeTimestamp;
     const bestBid = bids[0];
     const bestAsk = asks[0];
+    const entryMidpoint = bestBid && bestAsk ? (bestBid.price + bestAsk.price) / 2 : 0;
     const bookValid = Boolean(
       bestBid && bestAsk && bestBid.price < bestAsk.price &&
       Number.isFinite(dataAgeMs) && dataAgeMs >= 0 && dataAgeMs <= MAX_BOOK_AGE_MS
     );
 
-    if (!bestBid || !bestAsk) return jsonError(`${exchange === "bybit" ? "Bybit" : exchange === "binance" ? "Binance" : "Coinbase spot"} returned an empty or malformed order book`, 502);
+    if (!bestBid || !bestAsk) return jsonError(`${exchange === "bybit" ? "Bybit" : exchange === "binance" ? `Binance ${category}` : "Coinbase spot"} returned an empty or malformed order book`, 502);
     const timeForTradeWindow = Number.isFinite(tradeServerTime) ? tradeServerTime : fetchedAt;
     const validTrades = rawTrades.flatMap((trade) => {
       const price = Number(trade.price);
@@ -257,6 +294,8 @@ export async function POST(request: Request) {
       ],
       strategyAReason,
       strategyADecision,
+      5_000,
+      scenarioPlan(strategyADecision, entryMidpoint, completedCandles, swingLow, swingHigh),
     );
 
     let sweptSupport = false;
@@ -295,6 +334,8 @@ export async function POST(request: Request) {
         strategyBDecision ? "Sampled trades crossed a prior swing and reclaimed/rejected it; absorption remains unconfirmed" :
           "No sweep-and-reclaim pattern was found in the sampled trades",
       strategyBReady ? strategyBDecision : null,
+      5_000,
+      scenarioPlan(strategyBReady ? strategyBDecision : null, entryMidpoint, completedCandles, swingLow, swingHigh),
     );
 
     const bidVolume = bids.slice(0, 5).reduce((sum, level) => sum + level.quantity, 0);
@@ -333,6 +374,7 @@ export async function POST(request: Request) {
         : strategyCReason,
       strategyCDecision,
       2_000,
+      scenarioPlan(strategyCDecision, entryMidpoint, completedCandles, swingLow, swingHigh),
     );
 
     const strategies = [strategyA, strategyB, strategyC];
@@ -365,7 +407,7 @@ export async function POST(request: Request) {
 
     const quality = !bookValid
       ? { safe: false, quality: dataAgeMs > MAX_BOOK_AGE_MS ? "STALE" : "POOR", reason: "Snapshot is crossed, stale, malformed, or has a clock inconsistency", data_age_ms: dataAgeMs, timestamp_source: timestampSource }
-      : { safe: true, quality: "GOOD", reason: `Fresh valid ${exchange === "bybit" ? "Bybit" : exchange === "binance" ? "Binance USDⓈ-M" : "Coinbase spot"} order-book snapshot`, data_age_ms: dataAgeMs, timestamp_source: timestampSource };
+      : { safe: true, quality: "GOOD", reason: `Fresh valid ${exchange === "bybit" ? "Bybit" : exchange === "binance" ? `Binance ${category}` : "Coinbase spot"} order-book snapshot`, data_age_ms: dataAgeMs, timestamp_source: timestampSource };
     const payload: MarketStatusPayload = {
       symbol: marketSymbol,
       exchange,
@@ -391,3 +433,4 @@ export async function POST(request: Request) {
     return jsonError("Could not evaluate the public market snapshot. Refresh and try again.", 502);
   }
 }
+
