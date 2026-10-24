@@ -104,19 +104,9 @@ export default function MarketStatus({ onSnapshot }: { onSnapshot: (payload: Mar
             <Metric label="Snapshot age" value={status.data_age_ms >= 0
               ? `${status.data_age_ms} ms · ${status.quality.timestamp_source === "orderbook" ? "book timestamp" : "exchange-clock estimate"}`
               : "Clock skew detected"} />
-            <Metric label="Trade sample" value={`${status.trade_sample.returned}/${status.trade_sample.limit} recent trades`} />
+            <Metric label="Trade sample" value={`${status.trade_sample.returned}/${status.trade_sample.limit} recent trades${status.trade_sample.quality === "SAMPLED_LIMIT_REACHED" ? " · request cap reached" : ""}`} />
             <Metric label="Updated locally" value={new Date(status.fetched_at).toLocaleTimeString()} />
             <Metric label="Trades in prior second" value={String(status.trade_sample.trades_in_last_second)} />
-          </div>
-
-          <div className="mb-5 rounded border border-gray-700 bg-black/30 p-4">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="font-mono font-semibold text-white">Consensus</h3>
-              <span className="font-mono text-sm uppercase text-amber-300">
-                {status.decision.selected_candidate ? `${status.decision.selected_candidate} candidate` : "No trade"}
-              </span>
-            </div>
-            <p className="mt-2 text-sm text-gray-300">{status.decision.reason}</p>
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2">
@@ -124,8 +114,8 @@ export default function MarketStatus({ onSnapshot }: { onSnapshot: (payload: Mar
               <article key={strategy.strategy_name} className="rounded border border-gray-800 p-3">
                 <div className="flex items-start justify-between gap-2">
                   <h3 className="font-mono text-sm font-semibold text-gray-200">{strategy.strategy_name}</h3>
-                  <span className={`shrink-0 text-xs uppercase ${strategy.data_quality === "UNAVAILABLE" ? "text-red-300" : "text-gray-400"}`}>
-                    {strategy.data_quality === "UNAVAILABLE" ? "Unavailable" : strategy.selected_candidate ? `${strategy.selected_candidate} candidate` : strategy.data_quality === "INCOMPLETE" ? "Incomplete" : "No trade"}
+                  <span className={`shrink-0 text-xs uppercase ${strategy.data_quality === "UNAVAILABLE" ? "text-red-300" : strategy.data_quality === "LIMITED" ? "text-amber-300" : strategy.selected_candidate ? "text-emerald-300" : "text-gray-400"}`}>
+                    {strategy.data_quality === "UNAVAILABLE" ? "Unavailable" : strategy.data_quality === "LIMITED" ? `Limited${strategy.selected_candidate ? ` · ${strategy.selected_candidate} candidate` : ""}` : strategy.selected_candidate ? `${strategy.selected_candidate} candidate` : strategy.data_quality === "INCOMPLETE" ? "Incomplete" : "No trade"}
                   </span>
                 </div>
                 <p className="mt-2 text-xs text-gray-400">{strategy.reason}</p>
@@ -137,8 +127,18 @@ export default function MarketStatus({ onSnapshot }: { onSnapshot: (payload: Mar
             ))}
           </div>
 
+          <div className="mt-5 rounded border border-gray-700 bg-black/30 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="font-mono font-semibold text-white">Overall decision</h3>
+              <span className="font-mono text-sm uppercase text-amber-300">
+                {status.decision.selected_candidate ? `${status.decision.selected_candidate} consensus` : "No trade"}
+              </span>
+            </div>
+            <p className="mt-2 text-sm text-gray-300">{status.decision.reason}</p>
+          </div>
+
           <p className="mt-5 text-xs leading-relaxed text-gray-500">
-            Data is requested only when you press Refresh. Historical one-minute candles add price context; Strategy B checks a sampled sweep/reclaim proxy and cannot confirm resting-liquidity absorption. A saturated trade sample is marked incomplete. Coinbase fallback uses a USD spot product and can differ from the requested USDT perpetual market. These are unvalidated research heuristics, not recommendations or execution instructions. REST snapshots do not reproduce a continuous feed; missing or limited measurements are labelled above.
+            Data is requested only when you press Refresh. A full trade-sample response is checked against each strategy's required time window; limited inputs are shown on the affected strategy. Historical one-minute candles add price context; Strategy B is a sampled sweep/reclaim proxy and cannot confirm resting-liquidity absorption. Coinbase fallback uses a USD spot product and can differ from the requested USDT perpetual market. These are unvalidated research heuristics, not recommendations or execution instructions. REST snapshots do not reproduce a continuous feed.
           </p>
         </>
       )}
@@ -154,4 +154,3 @@ function Metric({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
-
