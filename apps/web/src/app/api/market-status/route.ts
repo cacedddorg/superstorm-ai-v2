@@ -12,7 +12,8 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const BOOK_LIMIT = 50;
-const TRADE_LIMIT = 100;
+const TRADE_LIMIT = 1_000;
+const CANDLE_LIMIT = 60;
 const MAX_BOOK_AGE_MS = 15_000;
 const MAX_PREVIOUS_SAMPLE_AGE_MS = 60_000;
 
@@ -77,7 +78,7 @@ export async function POST(request: Request) {
   if (!hasBasicAuthConfig()) return jsonError("Authentication is not configured", 503);
   if (!isAuthorizedBasicRequest(request.headers.get("authorization"))) return jsonError("Authentication required", 401);
   const contentLength = Number(request.headers.get("content-length") || 0);
-  if (contentLength > 64_000) return jsonError("Refresh request is too large", 413);
+  if (contentLength > 256_000) return jsonError("Refresh request is too large", 413);
   if (!request.headers.get("content-type")?.includes("application/json")) {
     return jsonError("Refresh request must use application/json", 415);
   }
@@ -96,10 +97,14 @@ export async function POST(request: Request) {
   if (!snapshot || !["bybit", "binance", "coinbase"].includes(snapshot.exchange ?? "") ||
       !["linear", "spot"].includes(snapshot.category ?? "") ||
       (snapshot.exchange === "coinbase") !== (snapshot.category === "spot") ||
+      !["orderbook", "exchange_clock_estimate"].includes(snapshot.timestamp_source ?? "") ||
       typeof snapshot.symbol !== "string" || !/^[A-Z0-9]{3,20}(?:-USD)?$/.test(snapshot.symbol) ||
       !Array.isArray(snapshot.bids) || snapshot.bids.length > BOOK_LIMIT ||
       !Array.isArray(snapshot.asks) || snapshot.asks.length > BOOK_LIMIT ||
       !Array.isArray(snapshot.trades) || snapshot.trades.length > TRADE_LIMIT ||
+      !Number.isInteger(snapshot.recent_trade_count) || (snapshot.recent_trade_count ?? -1) < 0 ||
+      !Number.isInteger(snapshot.trade_limit) || (snapshot.trade_limit ?? 0) < 1 || (snapshot.trade_limit ?? 0) > TRADE_LIMIT ||
+      !Array.isArray(snapshot.candles) || snapshot.candles.length > CANDLE_LIMIT ||
       typeof snapshot.exchange_timestamp !== "number" || !Number.isFinite(snapshot.exchange_timestamp) ||
       typeof snapshot.trade_server_time !== "number" || !Number.isFinite(snapshot.trade_server_time)) {
     return jsonError("A valid public market snapshot is required", 400);
@@ -121,6 +126,14 @@ export async function POST(request: Request) {
       (item.side === undefined || typeof item.side === "string");
   };
   if (!snapshot.trades.every(isTrade)) return jsonError("Market snapshot contains malformed trades", 400);
+  const isCandle = (candle: unknown): boolean => {
+    if (!candle || typeof candle !== "object") return false;
+    const item = candle as Record<string, unknown>;
+    return ["open_time", "open", "high", "low", "close", "volume"].every(
+      (key) => typeof item[key] === "number" && Number.isFinite(item[key]),
+    );
+  };
+  if (!snapshot.candles.every(isCandle)) return jsonError("Market snapshot contains malformed historical candles", 400);
 
   try {
     type NormalizedTrade = { price?: string; size?: string; timestamp?: string | number; side?: string };
@@ -130,6 +143,10 @@ export async function POST(request: Request) {
     const rawBids: unknown = snapshot.bids;
     const rawAsks: unknown = snapshot.asks;
     const rawTrades = snapshot.trades as NormalizedTrade[];
+    const recentTradeCount = snapshot.recent_trade_count as number;
+    const tradeLimit = snapshot.trade_limit as number;
+    const rawCandles = snapshot.candles as MarketSnapshotInput["candles"];
+    const timestampSource = snapshot.timestamp_source as MarketSnapshotInput["timestamp_source"];
     const exchangeTimestamp = snapshot.exchange_timestamp as number;
     const tradeServerTime = snapshot.trade_server_time as number;
     const bids = parseLevels(rawBids).sort((left, right) => right.price - left.price);
@@ -161,8 +178,11 @@ export async function POST(request: Request) {
     const tradesInLastSecond = validTrades.filter(
       (trade) => trade.timestamp <= timeForTradeWindow && trade.timestamp >= timeForTradeWindow - 1_000,
     ).length;
-    const tradeSampleQuality = rawTrades.length >= TRADE_LIMIT ? "SAMPLED_LIMIT_REACHED" : "SAMPLED";
+    const tradeSampleQuality = recentTradeCount >= tradeLimit ? "SAMPLED_LIMIT_REACHED" : "SAMPLED";
     const prior = validPreviousSample(input.previous_sample, fetchedAt, exchange);
+    const completedCandles = rawCandles
+      .filter((candle) => candle.open_time + 60_000 <= exchangeTimestamp)
+      .sort((left, right) => left.open_time - right.open_time);
 
     const cvd = validTrades.reduce(
       (sum, trade) => sum + (trade.side === "buy" ? trade.size : -trade.size),
@@ -173,54 +193,74 @@ export async function POST(request: Request) {
         (bestAsk.price < prior.best_ask ? bestAsk.quantity : bestAsk.price === prior.best_ask ? bestAsk.quantity - prior.best_ask_qty : -prior.best_ask_qty)
       : null;
 
-    const bidLevels = bids.slice(0, 10);
-    const askLevels = asks.slice(0, 10);
-    const supportLevels = bidLevels.filter((level, index) =>
-      index > 0 && index < bidLevels.length - 1 &&
-      level.quantity > bidLevels[index - 1].quantity && level.quantity > bidLevels[index + 1].quantity &&
-      level.quantity > bidLevels.reduce((sum, item) => sum + item.quantity, 0) / bidLevels.length * 1.5,
-    );
-    const resistanceLevels = askLevels.filter((level, index) =>
-      index > 0 && index < askLevels.length - 1 &&
-      level.quantity > askLevels[index - 1].quantity && level.quantity > askLevels[index + 1].quantity &&
-      level.quantity > askLevels.reduce((sum, item) => sum + item.quantity, 0) / askLevels.length * 1.5,
-    );
-
-    let strategyA: StrategyExplanation;
-    if (!bookValid) {
-      strategyA = makeStrategy(fetchedAt, "Strategy A (Momentum)", "None", "Order book is crossed, stale, or has a clock inconsistency", "POOR", ["fresh_valid_orderbook"], "Snapshot failed the market-data quality gate");
-    } else if (!prior) {
-      strategyA = makeStrategy(fetchedAt, "Strategy A (Momentum)", `CVD sample: ${cvd.toFixed(4)}; OFI unavailable`, "Single snapshots cannot establish order-flow change", "INCOMPLETE", ["prior_orderbook_sample_within_60_seconds"], "Refresh once more within 60 seconds to compare order-book samples");
-    } else {
-      let candidate: "buy" | "sell" | null = null;
-      let reason = "Momentum conditions were not met";
-      if (tradeSampleQuality !== "SAMPLED_LIMIT_REACHED" && ofi !== null && cvd > 10 && ofi > 0 && supportLevels.some((level) => level.price < bestBid.price)) {
-        candidate = "buy";
-        reason = "Positive sampled CVD and OFI with a visible bid-liquidity peak";
-      } else if (tradeSampleQuality !== "SAMPLED_LIMIT_REACHED" && ofi !== null && cvd < -10 && ofi < 0 && resistanceLevels.some((level) => level.price > bestAsk.price)) {
-        candidate = "sell";
-        reason = "Negative sampled CVD and OFI with a visible ask-liquidity peak";
-      }
-      strategyA = makeStrategy(
-        fetchedAt,
-        "Strategy A (Momentum)",
-        `Sampled CVD: ${cvd.toFixed(4)}, OFI between refreshes: ${ofi?.toFixed(4) ?? "unavailable"}; visible bid/ask liquidity peaks: ${supportLevels.length}/${resistanceLevels.length}`,
-        "Visible depth is cancellable liquidity, not confirmed historical price structure; the CVD sample is limited to recent public trades",
-        tradeSampleQuality === "SAMPLED_LIMIT_REACHED" ? "INCOMPLETE" : bookValid ? "GOOD" : "INCOMPLETE",
-        tradeSampleQuality === "SAMPLED_LIMIT_REACHED" ? ["recent_trade_sample_may_be_truncated"] : [],
-        tradeSampleQuality === "SAMPLED_LIMIT_REACHED" ? "Recent trade sample reached its limit; momentum candidate withheld" : reason,
-        candidate,
-      );
+    const strategyContext = completedCandles.length >= 26 && validTrades.length > 0;
+    const historyForStructure = completedCandles.slice(-21, -1);
+    const swingLow = historyForStructure.length ? Math.min(...historyForStructure.map((candle) => candle.low)) : null;
+    const swingHigh = historyForStructure.length ? Math.max(...historyForStructure.map((candle) => candle.high)) : null;
+    const fiveMinuteReturn = completedCandles.length >= 6
+      ? completedCandles.at(-1)!.close / completedCandles.at(-6)!.close - 1
+      : null;
+    const sampleTruncated = tradeSampleQuality === "SAMPLED_LIMIT_REACHED";
+    const strategyAReady = bookValid && strategyContext && fiveMinuteReturn !== null && !sampleTruncated;
+    let strategyADecision: "buy" | "sell" | null = null;
+    let strategyAReason = "Five-minute momentum and sampled CVD do not align";
+    if (strategyAReady && fiveMinuteReturn! >= 0.001 && cvd > 0) {
+      strategyADecision = "buy";
+      strategyAReason = "Positive five-minute candle momentum aligns with sampled taker-buy volume";
+    } else if (strategyAReady && fiveMinuteReturn! <= -0.001 && cvd < 0) {
+      strategyADecision = "sell";
+      strategyAReason = "Negative five-minute candle momentum aligns with sampled taker-sell volume";
     }
+    const strategyA = makeStrategy(
+      fetchedAt,
+      "Strategy A (Momentum)",
+      `Five-minute return: ${fiveMinuteReturn === null ? "unavailable" : `${(fiveMinuteReturn * 100).toFixed(3)}%`}; sampled CVD: ${cvd.toFixed(4)}; local swing low/high: ${swingLow?.toFixed(2) ?? "unavailable"}/${swingHigh?.toFixed(2) ?? "unavailable"}; OFI between refreshes: ${ofi?.toFixed(4) ?? "not sampled"}`,
+      "One-minute candles cannot show intrabar path; sampled CVD is recent public trade history and is not full-session flow",
+      strategyAReady ? "GOOD" : "INCOMPLETE",
+      strategyAReady ? [] : [
+        ...(!bookValid ? ["fresh_valid_orderbook"] : []),
+        ...(completedCandles.length < 26 ? ["at_least_26_completed_one_minute_candles"] : []),
+        ...(validTrades.length === 0 ? ["valid_taker_side_trade_sample"] : []),
+        ...(sampleTruncated ? ["trade_sample_may_be_truncated"] : []),
+      ],
+      strategyAReady ? strategyAReason : "Historical candles or an uncapped trade sample are required for this evaluation",
+      strategyADecision,
+    );
 
+    const orderedTrades = [...validTrades].sort((left, right) => left.timestamp - right.timestamp);
+    let sweptSupport = false;
+    let sweptResistance = false;
+    let reclaimedSupport = false;
+    let rejectedResistance = false;
+    if (swingLow !== null && swingHigh !== null) {
+      for (const trade of orderedTrades) {
+        if (trade.price < swingLow) sweptSupport = true;
+        else if (sweptSupport && trade.price >= swingLow) reclaimedSupport = true;
+        if (trade.price > swingHigh) sweptResistance = true;
+        else if (sweptResistance && trade.price <= swingHigh) rejectedResistance = true;
+      }
+    }
+    const midpointNow = (bestBid.price + bestAsk.price) / 2;
+    let strategyBDecision: "buy" | "sell" | null = null;
+    if (reclaimedSupport && midpointNow >= (swingLow ?? Infinity)) strategyBDecision = "buy";
+    else if (rejectedResistance && midpointNow <= (swingHigh ?? -Infinity)) strategyBDecision = "sell";
+    const strategyBReady = bookValid && strategyContext && !sampleTruncated && swingLow !== null && swingHigh !== null;
     const strategyB = makeStrategy(
       fetchedAt,
-      "Strategy B (Absorption Proxy)",
-      "No sweep/reclaim history is collected in refresh-only mode",
-      "A single order-book snapshot cannot prove absorption",
-      "UNAVAILABLE",
-      ["historical_sweeps", "continuous_trade_sequence"],
-      "Unavailable until timestamped sweep/reclaim observations are implemented",
+      "Strategy B (Sweep/Reclaim Proxy)",
+      `Scanned ${validTrades.length} timestamped trades against prior 20-minute swing low/high ${swingLow?.toFixed(2) ?? "unavailable"}/${swingHigh?.toFixed(2) ?? "unavailable"}; sampled price-path proxy, not proof of resting-liquidity absorption`,
+      "REST trades do not show queue depletion or cancellations at the swept price",
+      strategyBReady ? "GOOD" : "INCOMPLETE",
+      strategyBReady ? [] : [
+        ...(!bookValid ? ["fresh_valid_orderbook"] : []),
+        ...(completedCandles.length < 26 ? ["at_least_26_completed_one_minute_candles"] : []),
+        ...(validTrades.length === 0 ? ["timestamped_trade_sequence"] : []),
+        ...(sampleTruncated ? ["trade_sample_may_be_truncated"] : []),
+      ],
+      !strategyBReady ? "Historical candles and a complete recent trade sample are required" :
+        strategyBDecision ? "Sampled trades crossed a prior swing and reclaimed/rejected it; absorption remains unconfirmed" :
+          "No sweep-and-reclaim pattern was found in the sampled trades",
+      strategyBReady ? strategyBDecision : null,
     );
 
     const bidVolume = bids.slice(0, 5).reduce((sum, level) => sum + level.quantity, 0);
@@ -234,10 +274,10 @@ export async function POST(request: Request) {
       : midpoint;
     let strategyCDecision: "buy" | "sell" | null = null;
     let strategyCReason = "Imbalance neutral or there is no recent trade confirmation";
-    if (bookValid && tradeSampleQuality !== "SAMPLED_LIMIT_REACHED" && tradesInLastSecond >= 1 && imbalance > 0.4 && microprice > midpoint) {
+    if (bookValid && !sampleTruncated && tradesInLastSecond >= 1 && imbalance > 0.4 && microprice > midpoint) {
       strategyCDecision = "buy";
       strategyCReason = "Bid-heavy sampled depth and microprice with recent public-trade confirmation";
-    } else if (bookValid && tradeSampleQuality !== "SAMPLED_LIMIT_REACHED" && tradesInLastSecond >= 1 && imbalance < -0.4 && microprice < midpoint) {
+    } else if (bookValid && !sampleTruncated && tradesInLastSecond >= 1 && imbalance < -0.4 && microprice < midpoint) {
       strategyCDecision = "sell";
       strategyCReason = "Ask-heavy sampled depth and microprice with recent public-trade confirmation";
     }
@@ -246,14 +286,14 @@ export async function POST(request: Request) {
       "Strategy C (Imbalance)",
       `Top-five-level imbalance: ${imbalance.toFixed(4)}; microprice: ${microprice.toFixed(2)}; sampled trades in prior second: ${tradesInLastSecond}`,
       "Snapshot depth can be cancelled; exchange REST samples do not provide continuous order-flow confirmation",
-      tradeSampleQuality === "SAMPLED_LIMIT_REACHED" ? "INCOMPLETE" : bookValid ? "GOOD" : "POOR",
-      tradesInLastSecond > 0 ? (tradeSampleQuality === "SAMPLED_LIMIT_REACHED" ? ["trade_sample_may_be_truncated"] : []) : ["recent_trade_confirmation"],
+      sampleTruncated || !bookValid || validTrades.length === 0 ? "INCOMPLETE" : "GOOD",
+      sampleTruncated ? ["trade_sample_may_be_truncated"] : tradesInLastSecond > 0 ? [] : ["recent_trade_confirmation"],
       strategyCReason,
       strategyCDecision,
       2_000,
     );
 
-    const candidates = [strategyA, strategyC].filter(
+    const candidates = [strategyA, strategyB, strategyC].filter(
       (strategy) => strategy.decision === "actionable" && strategy.expiry >= fetchedAt,
     );
     const buys = candidates.filter((strategy) => strategy.selected_candidate === "buy").length;
@@ -265,7 +305,7 @@ export async function POST(request: Request) {
     const decision = makeStrategy(
       fetchedAt,
       "Strategy D (Consensus)",
-      `Candidates from eligible strategy rules: buy=${buys}, sell=${sells}; Strategy B is unavailable in refresh-only mode`,
+      `Candidates from eligible strategy rules: buy=${buys}, sell=${sells}; Strategy A and B share sampled candle/trade inputs`,
       conflict ? "Candidate strategies disagree" : "Fewer than two independent strategies agree",
       consensus ? "GOOD" : "INCOMPLETE",
       consensus ? [] : ["two_agreeing_eligible_strategy_candidates"],
@@ -274,8 +314,8 @@ export async function POST(request: Request) {
     );
 
     const quality = !bookValid
-      ? { safe: false, quality: dataAgeMs > MAX_BOOK_AGE_MS ? "STALE" : "POOR", reason: "Snapshot is crossed, stale, malformed, or has a clock inconsistency", data_age_ms: dataAgeMs }
-      : { safe: true, quality: "GOOD", reason: `Fresh valid ${exchange === "bybit" ? "Bybit" : exchange === "binance" ? "Binance USDⓈ-M" : "Coinbase spot"} order-book snapshot`, data_age_ms: dataAgeMs };
+      ? { safe: false, quality: dataAgeMs > MAX_BOOK_AGE_MS ? "STALE" : "POOR", reason: "Snapshot is crossed, stale, malformed, or has a clock inconsistency", data_age_ms: dataAgeMs, timestamp_source: timestampSource }
+      : { safe: true, quality: "GOOD", reason: `Fresh valid ${exchange === "bybit" ? "Bybit" : exchange === "binance" ? "Binance USDⓈ-M" : "Coinbase spot"} order-book snapshot`, data_age_ms: dataAgeMs, timestamp_source: timestampSource };
     const payload: MarketStatusPayload = {
       symbol: marketSymbol,
       exchange,
@@ -288,7 +328,7 @@ export async function POST(request: Request) {
       book_valid: bookValid,
       trade_sample: {
         returned: validTrades.length,
-        limit: TRADE_LIMIT,
+        limit: tradeLimit,
         trades_in_last_second: tradesInLastSecond,
         quality: tradeSampleQuality,
       },
@@ -301,3 +341,4 @@ export async function POST(request: Request) {
     return jsonError("Could not evaluate the public market snapshot. Refresh and try again.", 502);
   }
 }
+

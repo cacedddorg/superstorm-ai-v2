@@ -101,7 +101,9 @@ export default function MarketStatus({ onSnapshot }: { onSnapshot: (payload: Mar
           <div className="mb-5 grid grid-cols-2 gap-3 text-sm">
             <Metric label="Market" value={`${status.exchange} · ${status.symbol} · ${status.category}`} />
             <Metric label="Book quality" value={status.quality.quality} />
-            <Metric label="Snapshot age" value={status.data_age_ms >= 0 ? `${status.data_age_ms} ms` : "Clock skew detected"} />
+            <Metric label="Snapshot age" value={status.data_age_ms >= 0
+              ? `${status.data_age_ms} ms · ${status.quality.timestamp_source === "orderbook" ? "book timestamp" : "exchange-clock estimate"}`
+              : "Clock skew detected"} />
             <Metric label="Trade sample" value={`${status.trade_sample.returned}/${status.trade_sample.limit} recent trades`} />
             <Metric label="Updated locally" value={new Date(status.fetched_at).toLocaleTimeString()} />
             <Metric label="Trades in prior second" value={String(status.trade_sample.trades_in_last_second)} />
@@ -136,7 +138,7 @@ export default function MarketStatus({ onSnapshot }: { onSnapshot: (payload: Mar
           </div>
 
           <p className="mt-5 text-xs leading-relaxed text-gray-500">
-            Data is requested only when you press Refresh. Coinbase fallback uses a USD spot product and can differ from the requested USDT perpetual market. These are unvalidated research heuristics, not recommendations or execution instructions. REST snapshots do not reproduce a continuous feed; missing or limited measurements are labelled above.
+            Data is requested only when you press Refresh. Historical one-minute candles add price context; Strategy B checks a sampled sweep/reclaim proxy and cannot confirm resting-liquidity absorption. A saturated trade sample is marked incomplete. Coinbase fallback uses a USD spot product and can differ from the requested USDT perpetual market. These are unvalidated research heuristics, not recommendations or execution instructions. REST snapshots do not reproduce a continuous feed; missing or limited measurements are labelled above.
           </p>
         </>
       )}
@@ -152,3 +154,4 @@ function Metric({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
+
